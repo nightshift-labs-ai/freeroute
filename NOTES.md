@@ -80,3 +80,8 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
   cause unknown". An outcome sequence the model cannot explain is left out of the role coupling (never
   zeroes the other providers). Paired sim n=8000 (salt final): 21.870 -> 21.708 (-0.161, CI -0.173..-0.150).
   `node tools/sim.ts --paired --n 8000 --salt final --b useCause=1` (A = defaults, B = overrides).
+- Under useCause 1: knob re-check (paired n=2000, salt tune, A=21.724): slotModel 1 +0.23 (worse),
+  lossShare .0195 -0.004, .017 +0.06, mu 1.5 +0.07, slotT 16 0.000. Defaults kept.
+  Refusals/trial now: schedule 1.11, call-2 0.50, outage 0.12 (was 0.23). 10k (salt big2): 21.703 mean,
+  s99 100%, max 27. Cause parsing verified end to end against the live env on all three wire envelopes
+  (gemini, zai/anthropic, openrouter, pollinations 402): 10 refusals, 0 mismatches.
