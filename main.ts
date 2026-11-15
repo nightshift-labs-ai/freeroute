@@ -235,7 +235,7 @@ async function serveInference(api: ClientApi, req: IncomingMessage, res: ServerR
     const call = upstreamCall(api, body, c.provider.wire, c.model);
     const result = await callProvider(c, call.path, call.body, api, req.headers, Math.min(UPSTREAM_TIMEOUT_MS, left));
     const ok = result.status >= 200 && result.status < 300;
-    const answer = ok ? readAnswer(c.provider.wire, result.body, c.model) : null;
+    const answer = ok ? readAnswer(c.provider.wire, result.body, c.model, `call_${tag.replace(/[^A-Za-z0-9_-]/g, '')}_${attempt}`) : null;
     const message = ok ? '' : errorMessage(result.body);
     router.record({ provider: c.provider.id, model: c.model, ok: ok && answer !== null, status: result.status, code: result.code, message });
     if (result.status === 429 && result.code === 'concurrent_requests') skip.add(c.provider.id);

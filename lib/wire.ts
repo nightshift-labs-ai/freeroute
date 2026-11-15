@@ -169,7 +169,8 @@ export function fromOpenAI(body: Json): Neutral {
           msg.toolCalls.push({ id: typeof c.id === 'string' ? c.id : `call_${msg.toolCalls.length}`, name: c.function.name, args: argsText(c.function.arguments) });
         }
       } else if (isRecord(m.function_call) && typeof m.function_call.name === 'string') {
-        msg.toolCalls.push({ id: 'call_0', name: m.function_call.name, args: argsText(m.function_call.arguments) });
+        // Legacy function calling has no ids: the function name ties the call to its result.
+        msg.toolCalls.push({ id: m.function_call.name, name: m.function_call.name, args: argsText(m.function_call.arguments) });
       }
       n.messages.push(msg);
     } else if (m.role === 'tool' || m.role === 'function') {
@@ -384,7 +385,7 @@ export function toAnthropic(n: Neutral, model: string): Json {
   };
   for (const m of n.messages) {
     if (m.role === 'tool') {
-      const block: Json = { type: 'tool_result', tool_use_id: m.toolCallId ?? '', content: textOf(m.parts) };
+      const block: Json = { type: 'tool_result', tool_use_id: anthropicToolId(m.toolCallId ?? 'call'), content: textOf(m.parts) };
       if (m.isError) block.is_error = true;
       push('user', [block]);
       continue;
@@ -404,7 +405,7 @@ export function toAnthropic(n: Neutral, model: string): Json {
         blocks.push({ type: 'image', source: { type: 'url', url: p.url } });
       }
     }
-    for (const c of m.toolCalls) blocks.push({ type: 'tool_use', id: c.id, name: c.name, input: parseArgs(c.args) });
+    for (const c of m.toolCalls) blocks.push({ type: 'tool_use', id: anthropicToolId(c.id), name: c.name, input: parseArgs(c.args) });
     if (m.role === 'assistant' && blocks.length === 0) continue;
     messages.push({ role: m.role, content: blocks });
   }
@@ -469,7 +470,8 @@ export function toGemini(n: Neutral): Json {
         functionDeclarations: n.tools.map((t) => {
           const fn: Json = { name: t.name };
           if (t.description !== null) fn.description = t.description;
-          if (t.parameters !== null) fn.parameters = geminiSchema(t.parameters);
+          // parametersJsonSchema takes the client's JSON Schema whole ($ref, const, type arrays and all).
+          if (t.parameters !== null) fn.parametersJsonSchema = t.parameters;
           return fn;
         }),
       },
@@ -502,17 +504,6 @@ function guessImageType(url: string): string {
   return 'image/png';
 }
 
-/** Gemini's function schema is an OpenAPI subset: drop the JSON Schema keywords it refuses. */
-function geminiSchema(schema: unknown): unknown {
-  if (Array.isArray(schema)) return schema.map(geminiSchema);
-  if (!isRecord(schema)) return schema;
-  const out: Json = {};
-  for (const [k, v] of Object.entries(schema)) {
-    if (k === 'additionalProperties' || k === '$schema' || k === 'strict') continue;
-    out[k] = k === 'properties' && isRecord(v) ? Object.fromEntries(Object.entries(v).map(([pk, pv]) => [pk, geminiSchema(pv)])) : geminiSchema(v);
-  }
-  return out;
-}
 
 /** The provider call for one client request: the path under the provider's base and the JSON body. */
 export function upstreamCall(client: ClientApi, body: Json, wire: Wire, model: string): { path: string; body: Json } {
@@ -535,6 +526,15 @@ export function upstreamCall(client: ClientApi, body: Json, wire: Wire, model: s
 
 export type Stop = 'stop' | 'length' | 'tool_calls' | 'content_filter';
 
+export interface Usage {
+  /** every input token, cached ones included (what OpenAI's prompt_tokens counts) */
+  input: number;
+  output: number;
+  /** Anthropic's cache reads and writes, when the provider reported them (part of `input`) */
+  cacheRead?: number;
+  cacheCreation?: number;
+}
+
 export interface Answer {
   id: string | null;
   model: string;
@@ -543,7 +543,7 @@ export interface Answer {
   toolCalls: ToolCall[];
   stop: Stop;
   stopSequence: string | null;
-  usage: { input: number; output: number } | null;
+  usage: Usage | null;
 }
 
 const int = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
@@ -568,8 +568,11 @@ function geminiStop(v: unknown, hasCalls: boolean): Stop {
   return hasCalls ? 'tool_calls' : 'stop';
 }
 
-/** Read a provider's (non-streamed) answer in its wire; null when it is not one. */
-export function readAnswer(wire: Wire, body: unknown, model: string): Answer | null {
+/**
+ * Read a provider's (non-streamed) answer in its wire; null when it is not one. `callPrefix` names the
+ * tool calls a provider gives no id (Gemini): unique per request, so a conversation never repeats an id.
+ */
+export function readAnswer(wire: Wire, body: unknown, model: string, callPrefix = 'call'): Answer | null {
   if (!isRecord(body)) return null;
   if (wire === 'openai') {
     if (!Array.isArray(body.choices) || body.choices.length === 0 || !isRecord(body.choices[0])) return null;
@@ -612,7 +615,12 @@ export function readAnswer(wire: Wire, body: unknown, model: string): Answer | n
       else if (b.type === 'tool_use' && typeof b.name === 'string') toolCalls.push({ id: typeof b.id === 'string' ? b.id : `toolu_${toolCalls.length}`, name: b.name, args: argsText(b.input ?? {}) });
     }
     const u = isRecord(body.usage) ? body.usage : null;
-    const usage = u === null ? null : { input: int(u.input_tokens) + int(u.cache_creation_input_tokens) + int(u.cache_read_input_tokens), output: int(u.output_tokens) };
+    let usage: Usage | null = null;
+    if (u !== null) {
+      usage = { input: int(u.input_tokens) + int(u.cache_creation_input_tokens) + int(u.cache_read_input_tokens), output: int(u.output_tokens) };
+      if (typeof u.cache_read_input_tokens === 'number') usage.cacheRead = u.cache_read_input_tokens;
+      if (typeof u.cache_creation_input_tokens === 'number') usage.cacheCreation = u.cache_creation_input_tokens;
+    }
     return {
       id: typeof body.id === 'string' ? body.id : null,
       model: typeof body.model === 'string' ? body.model : model,
@@ -633,7 +641,7 @@ export function readAnswer(wire: Wire, body: unknown, model: string): Answer | n
     if (!isRecord(p)) continue;
     if (typeof p.text === 'string' && p.thought !== true) texts.push(p.text);
     else if (isRecord(p.functionCall) && typeof p.functionCall.name === 'string') {
-      toolCalls.push({ id: typeof p.functionCall.id === 'string' ? p.functionCall.id : `call_${toolCalls.length}`, name: p.functionCall.name, args: argsText(p.functionCall.args ?? {}) });
+      toolCalls.push({ id: typeof p.functionCall.id === 'string' ? p.functionCall.id : `${callPrefix}_${toolCalls.length}`, name: p.functionCall.name, args: argsText(p.functionCall.args ?? {}) });
     }
   }
   const um = isRecord(body.usageMetadata) ? body.usageMetadata : null;
@@ -680,8 +688,10 @@ export interface ReplyIds {
   created: number;
 }
 
+/** A tool-use id the Messages API takes (^[a-zA-Z0-9_-]+$), the same for a call and its result. */
 function anthropicToolId(id: string): string {
-  return id.startsWith('toolu_') ? id : `toolu_${id.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+  const safe = id.replace(/[^A-Za-z0-9_-]/g, '_');
+  return safe.startsWith('toolu_') ? safe : `toolu_${safe}`;
 }
 
 export function openAIJson(a: Answer, ids: ReplyIds): Json {
@@ -696,6 +706,14 @@ export function openAIJson(a: Answer, ids: ReplyIds): Json {
   };
   const usage = a.usage ?? { input: 0, output: 0 };
   out.usage = { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output };
+  return out;
+}
+
+/** Anthropic's usage block: input_tokens leaves out the cache reads and writes, reported beside it. */
+function anthropicUsage(u: Usage, output: number): Json {
+  const out: Json = { input_tokens: u.input - (u.cacheRead ?? 0) - (u.cacheCreation ?? 0), output_tokens: output };
+  if (u.cacheCreation !== undefined) out.cache_creation_input_tokens = u.cacheCreation;
+  if (u.cacheRead !== undefined) out.cache_read_input_tokens = u.cacheRead;
   return out;
 }
 
@@ -740,7 +758,7 @@ export function anthropicJson(a: Answer, ids: ReplyIds): Json {
     content,
     stop_reason: anthropicStopReason(a),
     stop_sequence: a.stopSequence,
-    usage: { input_tokens: usage.input, output_tokens: usage.output },
+    usage: anthropicUsage(usage, usage.output),
   };
 }
 
@@ -748,7 +766,7 @@ export function anthropicStream(a: Answer, ids: ReplyIds): string {
   const usage = a.usage ?? { input: 0, output: 0 };
   let out = sse('message_start', {
     type: 'message_start',
-    message: { id: ids.id, type: 'message', role: 'assistant', model: a.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: usage.input, output_tokens: 0 } },
+    message: { id: ids.id, type: 'message', role: 'assistant', model: a.model, content: [], stop_reason: null, stop_sequence: null, usage: anthropicUsage(usage, 0) },
   });
   let index = 0;
   if (a.text !== '' || a.toolCalls.length === 0) {
