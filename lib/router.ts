@@ -144,6 +144,8 @@ export class Router {
   readonly #weightsAfter: number[];
   readonly #seed: string;
   #decisions = 0;
+  /** test hook: a provider to prefer whenever it can serve (empty in a trial) */
+  prefer = '';
 
   constructor(brief: Brief, catalog: Catalog, params: Params = DEFAULT_PARAMS, seed = '') {
     this.brief = brief;
@@ -243,6 +245,11 @@ export class Router {
     const cands = this.plan(entry, requires, needs, tried);
     this.#decisions += 1;
     const at = entry === null ? -1 : this.brief.manifest.findIndex((m) => m.id === entry.id);
+    // A test hook (FREEROUTE_PREFER, never set in a trial): send every request a provider can serve to it.
+    if (this.prefer !== '') {
+      const p = cands.find((c) => c.provider.id === this.prefer && c.pOk > 0.05);
+      if (p !== undefined) return p;
+    }
     if (this.params.planner === 1 && at !== -1 && cands.length > 1) return this.#assign(at, cands) ?? cands[0];
     const K = Math.min(this.params.rolloutK, cands.length);
     if (K <= 1 || at === -1) return cands[0];

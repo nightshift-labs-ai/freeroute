@@ -44,3 +44,8 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
   to provider call slots (slot t cost = 1 - P(t-th next call ok | earlier ok), exact posterior) + mu*loss;
   mu raised by bisection (cap 12) until the plan keeps loss <= lossShare*bound. Row 0 (this request) may
   only take a provider's FIRST slot (else it chooses a later slot it cannot actually get). -0.3 calls.
+- Wire coverage test: `node tools/harness.ts --trial 0 --quiet --prefer <provider>` forces routing to one
+  provider whenever it can serve (FREEROUTE_PREFER test hook, unset in trials). All 10 providers: wire 100.
+- Fidelity fixes from the wire-review workflow: Anthropic stop_sequence kept, legacy function_call and
+  refusal read, reply ids never copied across wires, usage always present, Anthropic error types by status,
+  data-URL media type without parameters.

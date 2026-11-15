@@ -95,7 +95,9 @@ export function blocksText(content: unknown): string {
 function dataUrl(url: string): { mediaType: string; data: string } | null {
   const m = /^data:([^,]*?);base64,(.*)$/s.exec(url);
   if (m === null) return null;
-  return { mediaType: m[1] === '' ? 'application/octet-stream' : m[1], data: m[2] };
+  // The media type alone: parameters such as ;name=... are not part of it.
+  const mediaType = m[1].split(';')[0].trim();
+  return { mediaType: mediaType === '' ? 'application/octet-stream' : mediaType, data: m[2] };
 }
 
 function imageFromUrl(url: string): ImagePart {
@@ -582,15 +584,20 @@ export function readAnswer(wire: Wire, body: unknown, model: string): Answer | n
         if (!isRecord(c) || !isRecord(c.function) || typeof c.function.name !== 'string') continue;
         toolCalls.push({ id: typeof c.id === 'string' ? c.id : `call_${toolCalls.length}`, name: c.function.name, args: argsText(c.function.arguments) });
       }
+    } else if (isRecord(message.function_call) && typeof message.function_call.name === 'string') {
+      // The legacy single function call.
+      toolCalls.push({ id: 'call_0', name: message.function_call.name, args: argsText(message.function_call.arguments) });
     }
+    // A refusal carries its own text and no content: pass it on as the answer, stopped by the filter.
+    const refusal = typeof message.refusal === 'string' && message.refusal !== '' && text === '' ? message.refusal : null;
     const usage = isRecord(body.usage) ? { input: int(body.usage.prompt_tokens), output: int(body.usage.completion_tokens) } : null;
     return {
       id: typeof body.id === 'string' ? body.id : null,
       model: typeof body.model === 'string' ? body.model : model,
       created: typeof body.created === 'number' ? body.created : null,
-      text,
+      text: refusal ?? text,
       toolCalls,
-      stop: openAIStop(choice.finish_reason),
+      stop: refusal !== null ? 'content_filter' : openAIStop(choice.finish_reason),
       stopSequence: null,
       usage,
     };
@@ -687,8 +694,14 @@ export function openAIJson(a: Answer, ids: ReplyIds): Json {
     model: a.model,
     choices: [{ index: 0, message, logprobs: null, finish_reason: a.stop }],
   };
-  if (a.usage !== null) out.usage = { prompt_tokens: a.usage.input, completion_tokens: a.usage.output, total_tokens: a.usage.input + a.usage.output };
+  const usage = a.usage ?? { input: 0, output: 0 };
+  out.usage = { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output };
   return out;
+}
+
+/** The Anthropic stop_reason: a matched stop sequence is stop_sequence, as the Messages API reports it. */
+function anthropicStopReason(a: Answer): string {
+  return a.stop === 'stop' && a.stopSequence !== null ? 'stop_sequence' : ANTHROPIC_STOP[a.stop];
 }
 
 export function openAIStream(a: Answer, ids: ReplyIds): string {
@@ -725,7 +738,7 @@ export function anthropicJson(a: Answer, ids: ReplyIds): Json {
     role: 'assistant',
     model: a.model,
     content,
-    stop_reason: ANTHROPIC_STOP[a.stop],
+    stop_reason: anthropicStopReason(a),
     stop_sequence: a.stopSequence,
     usage: { input_tokens: usage.input, output_tokens: usage.output },
   };
@@ -751,7 +764,7 @@ export function anthropicStream(a: Answer, ids: ReplyIds): string {
     out += sse('content_block_stop', { type: 'content_block_stop', index });
     index += 1;
   }
-  out += sse('message_delta', { type: 'message_delta', delta: { stop_reason: ANTHROPIC_STOP[a.stop], stop_sequence: a.stopSequence }, usage: { output_tokens: usage.output } });
+  out += sse('message_delta', { type: 'message_delta', delta: { stop_reason: anthropicStopReason(a), stop_sequence: a.stopSequence }, usage: { output_tokens: usage.output } });
   out += sse('message_stop', { type: 'message_stop' });
   return out;
 }
@@ -772,7 +785,16 @@ export function clientError(client: ClientApi, status: number, code: string, mes
     const type = status === 429 ? 'rate_limit_error' : status >= 500 ? 'api_error' : status === 401 ? 'authentication_error' : 'invalid_request_error';
     return { status, contentType: 'application/json', body: JSON.stringify({ error: { message, type, param: null, code } }) };
   }
-  const type =
-    status === 429 ? 'rate_limit_error' : status === 401 ? 'authentication_error' : status === 404 ? 'not_found_error' : status === 529 ? 'overloaded_error' : status >= 500 ? 'api_error' : 'invalid_request_error';
+  const byStatus: Record<number, string> = {
+    401: 'authentication_error',
+    402: 'billing_error',
+    403: 'permission_error',
+    404: 'not_found_error',
+    413: 'request_too_large',
+    429: 'rate_limit_error',
+    504: 'timeout_error',
+    529: 'overloaded_error',
+  };
+  const type = byStatus[status] ?? (status >= 500 ? 'api_error' : 'invalid_request_error');
   return { status, contentType: 'application/json', body: JSON.stringify({ type: 'error', error: { type, message } }) };
 }

@@ -68,6 +68,7 @@ async function runTrial(trial: number, envPort: number): Promise<Run> {
     MAKEFUN_PROMPT_FILE: prompt,
     MAKEFUN_TRIAL_SEED: seedOf(trial),
     MAKEFUN_TRIAL_NOW: TRIAL_NOW,
+    ...(opt('--prefer', '') !== '' ? { FREEROUTE_PREFER: opt('--prefer', '') } : {}),
   };
   // --list first, as a checker would: it must print what the server registers.
   const list = await new Promise<string>((res) => {

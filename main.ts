@@ -209,8 +209,11 @@ async function serveInference(api: ClientApi, req: IncomingMessage, res: ServerR
     log(`${tag} ${api}${stream ? ' stream' : ''} -> ${c.provider.id}/${c.model}: ${result.status}${result.code === '' ? '' : ` ${result.code}`}`);
     if (ok && answer !== null) {
       router.served(entry, c);
+      // The provider's own id when it speaks the client's wire; else one in the client's id shape, made
+      // from the request's manifest id (never a clock or a random draw).
       const prefix = api === 'openai' ? 'chatcmpl-' : 'msg_';
-      const ids = { id: answer.id ?? `${prefix}${tag}`, created: CREATED };
+      const ownId = c.provider.wire === api && answer.id !== null ? answer.id : null;
+      const ids = { id: ownId ?? `${prefix}freeroute-${tag.replace(/[^A-Za-z0-9_-]/g, '')}`, created: CREATED };
       send(res, clientReply(api, stream, c.provider.wire, result.body, answer, ids));
       return;
     }
@@ -363,6 +366,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   router = new Router(brief, catalog, undefined, process.env.MAKEFUN_TRIAL_SEED ?? '');
+  router.prefer = process.env.FREEROUTE_PREFER ?? '';
   if (ENV_URL === '') {
     log('MAKEFUN_ENV_URL is not set: nothing to serve');
     process.exit(0);
