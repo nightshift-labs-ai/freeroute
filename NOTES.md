@@ -73,3 +73,4 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
   name, Anthropic cache-token fields kept. Not done (deliberately): truncating stop sequences to real-API
   limits (the brief says never drop them), Gemini thoughtSignature round-trip, re-streaming thinking blocks.
 - row0Scale (risk weight on this request's own slot): 0.7 worse (22.36), 1.0/1.3/1.7 equal (21.92). Kept 1.
+- discount (later rows' refusal costs x discount^i): 0.97/0.93 -> 21.99, 0.85 -> 22.09, worse than 1 (21.92). Kept 1.
