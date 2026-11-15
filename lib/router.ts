@@ -67,9 +67,11 @@ export interface Params {
   slotModel: number;
   /** slotModel 1: refusals a success that can never come is charged (what finding out costs) */
   deadCost: number;
+  /** weight on the refusal chance of this request's own call (later rows can still be re-planned) */
+  row0Scale: number;
 }
 
-export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.0185, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5, planner: 1, slotT: 12, planMargin: 0, slotModel: 0, deadCost: 1.5 };
+export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.0185, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5, planner: 1, slotT: 12, planMargin: 0, slotModel: 0, deadCost: 1.5, row0Scale: 1 };
 
 /** Min-cost assignment of every row to a distinct column (rows <= columns): the Hungarian method with potentials. */
 export function hungarian(cost: number[][]): number[] {
@@ -325,7 +327,7 @@ export class Router {
       const cost: number[][] = rows.map((slots, i) => {
         const r = new Array<number>(m).fill(BIG);
         // This request makes its provider's very next call: row 0 may take only a first slot.
-        for (const s of slots) for (let t = 0; t < (i === 0 ? 1 : T); t++) r[s.q * T + t] = slotCost[s.q][t] + (mu * s.loss) / 1000;
+        for (const s of slots) for (let t = 0; t < (i === 0 ? 1 : T); t++) r[s.q * T + t] = slotCost[s.q][t] * (i === 0 ? this.params.row0Scale : 1) + (mu * s.loss) / 1000;
         return r;
       });
       // The method needs at least as many columns as rows: pad with unusable ones.

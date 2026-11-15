@@ -63,3 +63,4 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
   tool-call ids unique per request, Anthropic tool ids sanitised, legacy function_call history keyed by
   name, Anthropic cache-token fields kept. Not done (deliberately): truncating stop sequences to real-API
   limits (the brief says never drop them), Gemini thoughtSignature round-trip, re-streaming thinking blocks.
+- row0Scale (risk weight on this request's own slot): 0.7 worse (22.36), 1.0/1.3/1.7 equal (21.92). Kept 1.
