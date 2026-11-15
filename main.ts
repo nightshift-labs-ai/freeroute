@@ -124,7 +124,17 @@ function bodyRequires(api: ClientApi, body: Json): { requires: Requires; needs: 
   for (const t of n.tools) chars += t.name.length + (t.description?.length ?? 0) + JSON.stringify(t.parameters ?? {}).length;
   const estimate = Math.ceil(chars / 3) + (n.maxTokens ?? 0);
   if (estimate > 16384) requires.min_context = estimate;
-  return { requires, needs: { jsonMode: api === 'openai' && n.jsonMode !== null, noMaxTokens: n.maxTokens === null } };
+  // What only the client's own wire carries through intact (each wire's parser reads these differently):
+  // a turn that ends on a tool result, a developer message beside a system one, an Anthropic server tool.
+  const last = n.messages[n.messages.length - 1];
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const lastRaw = messages[messages.length - 1];
+  const endsOnToolResult =
+    last?.role === 'tool' || (api === 'anthropic' && isRecord(lastRaw) && Array.isArray(lastRaw.content) && lastRaw.content.some((b) => isRecord(b) && b.type === 'tool_result'));
+  const developerAndSystem = api === 'openai' && messages.some((m) => isRecord(m) && m.role === 'developer') && messages.some((m) => isRecord(m) && m.role === 'system');
+  const serverTools = api === 'anthropic' && Array.isArray(body.tools) && body.tools.some((t) => isRecord(t) && typeof t.type === 'string' && t.type !== 'custom');
+  const sameWire = endsOnToolResult || developerAndSystem || serverTools ? api : null;
+  return { requires, needs: { jsonMode: api === 'openai' && n.jsonMode !== null, noMaxTokens: n.maxTokens === null, sameWire } };
 }
 
 function mergeRequires(a: Requires, b: Requires): Requires {

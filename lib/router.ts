@@ -30,6 +30,8 @@ export interface WireNeeds {
   jsonMode: boolean;
   /** the client named no output cap: an Anthropic-wire call would have to invent one */
   noMaxTokens: boolean;
+  /** the request carries something only its own wire passes through intact: keep it on that wire if any provider can */
+  sameWire?: 'openai' | 'anthropic' | null;
 }
 
 export interface Outcome {
@@ -173,6 +175,13 @@ export class Router {
 
   /** Every free model that meets the request and its wire needs, unranked. */
   eligible(requires: Requires, needs: WireNeeds): { provider: ProviderInfo; model: string; rating: number }[] {
+    const all = this.#eligible(requires, needs);
+    if (needs.sameWire === undefined || needs.sameWire === null) return all;
+    const same = all.filter((e) => e.provider.wire === needs.sameWire);
+    return same.length > 0 ? same : all;
+  }
+
+  #eligible(requires: Requires, needs: WireNeeds): { provider: ProviderInfo; model: string; rating: number }[] {
     const out: { provider: ProviderInfo; model: string; rating: number }[] = [];
     for (const p of this.brief.providers) {
       if (needs.jsonMode && p.wire === 'anthropic') continue;
