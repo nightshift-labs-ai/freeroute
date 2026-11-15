@@ -40,6 +40,8 @@ export interface Outcome {
   ok: boolean;
   status: number;
   code: string;
+  /** the provider's error message, when it refused */
+  message?: string;
 }
 
 export interface Params {
@@ -230,9 +232,10 @@ export class Router {
     for (const e of this.eligible(requires, needs)) {
       const id = e.provider.id;
       if (this.broken.has(id) || this.broken.has(`${id}/${e.model}`)) continue;
-      // A provider this request already called is not excluded: a refusal on its failure schedule leaves
-      // the next call free to succeed, and the posterior knows how likely that is.
-      void tried;
+      // `tried` holds only the providers this request must pass over (busy, or refusing its body). One
+      // that refused on its failure schedule stays a candidate: its next call may well succeed, and the
+      // posterior knows how likely that is.
+      if (tried.has(id)) continue;
       const loss = Math.max(0, best - e.rating) * weight;
       const pOk = this.posterior.pNext(id);
       // An Anthropic-wire call must name max_tokens: with none from the client the echo would differ.
@@ -325,6 +328,8 @@ export class Router {
         for (const s of slots) for (let t = 0; t < (i === 0 ? 1 : T); t++) r[s.q * T + t] = slotCost[s.q][t] + (mu * s.loss) / 1000;
         return r;
       });
+      // The method needs at least as many columns as rows: pad with unusable ones.
+      for (const r of cost) while (r.length < cost.length) r.push(BIG * 10);
       const assign = hungarian(cost);
       let loss = 0;
       rows.forEach((slots, i) => {
@@ -332,7 +337,7 @@ export class Router {
         const s = slots.find((x) => x.q === q);
         loss += s === undefined ? 0 : s.loss;
       });
-      return { first: Math.floor(assign[0] / T), loss };
+      return { first: assign[0] < m ? Math.floor(assign[0] / T) : -1, loss };
     };
     let plan = solve(this.params.mu);
     if (this.lossSoFar + plan.loss > limit) {
@@ -413,13 +418,23 @@ export class Router {
     return calls + (this.params.objMu * loss) / 1000 + penalty;
   }
 
+  /** Is a 4xx about the model (unknown, paid, retired) rather than about the request body? */
+  static modelLevel(code: string, message: string): boolean {
+    return code === 'invalid_model' || code === 'model_not_found' || code === 'not_found_error' || /\bmodel\b/i.test(message);
+  }
+
   record(o: Outcome): void {
+    if (o.status === 429 && o.code === 'concurrent_requests') {
+      // A second call while one was in flight: the provider spent nothing and nothing is learnt.
+      return;
+    }
     if (o.ok) {
       this.posterior.observe(o.provider, true);
-    } else if ((o.status === 402 || o.status === 429) && o.code !== 'concurrent_requests') {
+    } else if (o.status === 402 || o.status === 429) {
       this.posterior.observe(o.provider, false);
-    } else if (o.status === 400 || o.status === 404) {
-      this.broken.add(`${o.provider}/${o.model}`);
+    } else if (o.status === 400 || o.status === 404 || o.status === 413 || o.status === 422) {
+      // Only a refusal of the model marks it; a refusal of the request body says nothing about the next one.
+      if (Router.modelLevel(o.code, o.message ?? '')) this.broken.add(`${o.provider}/${o.model}`);
     } else if (o.status === 401 || o.status === 403) {
       this.broken.add(o.provider);
     } else if (o.status === 0 || o.status >= 500) {

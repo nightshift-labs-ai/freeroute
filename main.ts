@@ -22,7 +22,9 @@ const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
 const PROMPT_FILE = process.env.MAKEFUN_PROMPT_FILE ?? '';
 const PROTOCOL_VERSION = 1;
 const POLL_MS = 150;
-const UPSTREAM_TIMEOUT_MS = 25000;
+/** One provider call's longest wait, and the whole request's (the env's client waits 30 s). */
+const UPSTREAM_TIMEOUT_MS = 12000;
+const REQUEST_BUDGET_MS = 26000;
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** The port we try first; the next ones in turn if it is taken (never 8080, the env's own). */
 const PREFERRED_PORT = 18787;
@@ -164,8 +166,16 @@ function errorCode(body: unknown): string {
   return '';
 }
 
-/** One provider call. The env's answer, parsed; status 0 when no answer came back. */
-async function callProvider(c: Candidate, path: string, body: Json, api: ClientApi, headersIn: IncomingMessage['headers']): Promise<CallResult> {
+function errorMessage(body: unknown): string {
+  if (!isRecord(body)) return '';
+  const e = body.error;
+  if (isRecord(e) && typeof e.message === 'string') return e.message;
+  if (typeof body.message === 'string') return body.message;
+  return '';
+}
+
+/** One provider call. The env's answer, parsed; status 0 when no answer came back in `timeoutMs`. */
+async function callProvider(c: Candidate, path: string, body: Json, api: ClientApi, headersIn: IncomingMessage['headers'], timeoutMs: number): Promise<CallResult> {
   const p = c.provider;
   const url = `${dialBase(ENV_URL, p.path)}${path}`;
   const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json', ...authHeaders(p) };
@@ -176,7 +186,7 @@ async function callProvider(c: Candidate, path: string, body: Json, api: ClientA
     if (api === 'anthropic' && typeof beta === 'string' && beta !== '') headers['anthropic-beta'] = beta;
   }
   try {
-    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
     const text = await res.text();
     let parsed: unknown = null;
     try {
@@ -204,18 +214,40 @@ async function serveInference(api: ClientApi, req: IncomingMessage, res: ServerR
   const fromBody = bodyRequires(api, body);
   const requires = mergeRequires(entry?.requires ?? {}, fromBody.requires);
   const tag = entry?.id ?? `#${index + 1}`;
-  const tried = new Set<string>();
+  // Providers to pass over for this request only: one still busy with a call (concurrent_requests).
+  const skip = new Set<string>();
+  // Providers that refused the request itself (a 4xx about the body, not the model): two of them end it.
+  const rejectedBody = new Set<string>();
+  // One deadline for the whole request, inside the client's own 30 s wait; and once the client has gone,
+  // no further provider call is made for it (its calls would be counted against the next request).
+  const deadline = performance.now() + REQUEST_BUDGET_MS;
+  let clientGone = false;
+  res.on('close', () => {
+    if (!res.writableEnded) clientGone = true;
+  });
   let lastStatus = 503;
   let lastCode = 'no_provider';
   for (let attempt = 0; attempt < 24; attempt++) {
-    const c = router.choose(entry, requires, fromBody.needs, tried);
+    const left = deadline - performance.now();
+    if (clientGone || left < 500) break;
+    const c = router.choose(entry, requires, fromBody.needs, skip);
     if (c === undefined) break;
-    tried.add(c.provider.id);
     const call = upstreamCall(api, body, c.provider.wire, c.model);
-    const result = await callProvider(c, call.path, call.body, api, req.headers);
+    const result = await callProvider(c, call.path, call.body, api, req.headers, Math.min(UPSTREAM_TIMEOUT_MS, left));
     const ok = result.status >= 200 && result.status < 300;
     const answer = ok ? readAnswer(c.provider.wire, result.body, c.model) : null;
-    router.record({ provider: c.provider.id, model: c.model, ok: ok && answer !== null, status: result.status, code: result.code });
+    const message = ok ? '' : errorMessage(result.body);
+    router.record({ provider: c.provider.id, model: c.model, ok: ok && answer !== null, status: result.status, code: result.code, message });
+    if (result.status === 429 && result.code === 'concurrent_requests') skip.add(c.provider.id);
+    if ((result.status === 400 || result.status === 413 || result.status === 422) && !Router.modelLevel(result.code, message)) {
+      rejectedBody.add(c.provider.id);
+      if (rejectedBody.size >= 2) {
+        log(`${tag}: two providers refused the request body itself (${message}); answering 400`);
+        send(res, clientError(api, 400, result.code || 'invalid_request_error', message || 'the request was refused by the providers'));
+        return;
+      }
+      skip.add(c.provider.id);
+    }
     log(`${tag} ${api}${stream ? ' stream' : ''} -> ${c.provider.id}/${c.model}: ${result.status}${result.code === '' ? '' : ` ${result.code}`}`);
     if (ok && answer !== null) {
       router.served(entry, c);

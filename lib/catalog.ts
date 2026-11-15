@@ -28,7 +28,10 @@ export interface ListedModel {
   context_length: number | null;
 }
 
-const PROBE_TIMEOUT_MS = 5000;
+/** Each catalog probe's wait, and how many times a probe that got no usable answer is tried. The catalog
+ *  goes into the env's state export, so a probe that merely ran slow must not shrink it: retry first. */
+const PROBE_TIMEOUT_MS = 8000;
+const PROBE_ATTEMPTS = 3;
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : null);
 
@@ -63,24 +66,31 @@ export async function probeProvider(envUrl: string, p: ProviderInfo): Promise<Li
   const url = p.wire === 'gemini' ? `${base}/v1beta/models` : `${base}/v1/models`;
   const headers: Record<string, string> = { accept: 'application/json', ...authHeaders(p) };
   if (p.wire === 'anthropic') headers['anthropic-version'] = '2023-06-01';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { headers, signal: controller.signal });
-    const text = await res.text();
-    if (res.status < 200 || res.status >= 300) return null;
-    let body: unknown;
+  for (let attempt = 0; attempt < PROBE_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
     try {
-      body = JSON.parse(text);
+      const res = await fetch(url, { headers, signal: controller.signal });
+      const text = await res.text();
+      // A refusal of the key or the route is the provider's answer: asking again changes nothing.
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) return null;
+      if (res.status >= 200 && res.status < 300) {
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = null;
+        }
+        const listed = listedModels(p.wire, body);
+        if (listed !== null) return listed;
+      }
     } catch {
-      return null;
+      // no answer in time: try again
+    } finally {
+      clearTimeout(timer);
     }
-    return listedModels(p.wire, body);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
   }
+  return null;
 }
 
 /**

@@ -125,7 +125,6 @@ export function simulate(brief: Brief, tiers: TierDraw[], params: Params, trace 
     for (let attempt = 0; attempt < 24; attempt++) {
       const c = router.choose(entry, entry.requires, needs, tried);
       if (c === undefined) break;
-      tried.add(c.provider.id);
       const t = tiers.find((x) => x.id === c.provider.id)!;
       const n = (counts.get(t.id) ?? 0) + 1;
       counts.set(t.id, n);
