@@ -84,8 +84,11 @@ function send(res: ServerResponse, reply: Reply): void {
   res.end(body);
 }
 
-/** The id of the request the client is sending now: GET /work names it; else the arrival order does. */
-async function currentEntry(index: number): Promise<ManifestEntry | null> {
+/**
+ * The manifest row of the request the client is sending now: GET /work names it while it is in flight;
+ * else the arrival order does. A row whose API or streaming disagrees with the request itself is not it.
+ */
+async function currentEntry(index: number, api: ClientApi, stream: boolean): Promise<ManifestEntry | null> {
   let id: string | null = null;
   if (ENV_URL !== '') {
     try {
@@ -96,8 +99,12 @@ async function currentEntry(index: number): Promise<ManifestEntry | null> {
       id = null;
     }
   }
+  const fits = (m: ManifestEntry | undefined): m is ManifestEntry => m !== undefined && m.api === api && m.stream === stream;
   const byId = id === null ? undefined : brief.manifest.find((m) => m.id === id);
-  return byId ?? brief.manifest[index] ?? null;
+  if (fits(byId)) return byId;
+  const byOrder = brief.manifest[index];
+  if (fits(byOrder)) return byOrder;
+  return byId ?? byOrder ?? null;
 }
 
 /** What the body itself asks of a model, beyond the manifest's word. */
@@ -183,7 +190,7 @@ async function serveInference(api: ClientApi, req: IncomingMessage, res: ServerR
   }
   const body = parsed.value;
   const stream = body.stream === true;
-  const entry = await currentEntry(index);
+  const entry = await currentEntry(index, api, stream);
   const fromBody = bodyRequires(api, body);
   const requires = mergeRequires(entry?.requires ?? {}, fromBody.requires);
   const tag = entry?.id ?? `#${index + 1}`;
