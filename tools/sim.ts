@@ -199,6 +199,9 @@ if (isMain) {
     rolloutK: opt('--K', DEFAULT_PARAMS.rolloutK),
     rolloutM: opt('--M', DEFAULT_PARAMS.rolloutM),
     objMu: opt('--objmu', DEFAULT_PARAMS.objMu),
+    planner: opt('--planner', DEFAULT_PARAMS.planner),
+    slotT: opt('--T', DEFAULT_PARAMS.slotT),
+    planMargin: opt('--margin', DEFAULT_PARAMS.planMargin),
   };
   const n = opt('--n', 2000);
   const salt = args.includes('--salt') ? args[args.indexOf('--salt') + 1] : 'sim';

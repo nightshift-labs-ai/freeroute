@@ -30,6 +30,7 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
 | v1 naive best-rating + hop on refusal | 99 (q98) | 99 (q99) | 99 (q98) | 28/26/28 |
 | v2 posterior-greedy (mu 0.5, share .017), re-call allowed | 99 (q98) | 99 (q98) | 99 (q98) | 22/22/23 (sim mean 22.19 over 2000, s99 100%) |
 | 3e9ecc4 same + SPDX header, rollout code (off) | 99 (q98) | 99 (q98) | 99 (q98) | 22/22/23 |
+| v3 slot-assignment planner (Hungarian, mu .5, share .0185, margin 0) | 99 (q98) | 99 (q98) | 99 (q98) | 22/22/22 (sim val-2000: 21.92 vs greedy 22.25; s99 100%) |
 
 ## Router / simulator
 - lib/posterior.ts: exact Bayesian posterior per provider over (budget, fail set, outage), coupled by
@@ -38,3 +39,8 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
   `node tools/sim.ts --n 2000 --mu 0.5` ; `--practice` traces the 3 practice seeds (matches harness exactly).
 - Lesson: never exclude a provider already tried in this request (a schedule refusal leaves the next call
   free) -- excluding caused unserved scarce requests (r06 vision, r10-12 min_context) in ~8% of instances.
+- Rollout lookahead (rolloutK>1, posterior sampling + greedy playout): no gain over greedy (within noise). Off.
+- Slot-assignment planner (planner 1): each decision solves min-cost assignment of all remaining requests
+  to provider call slots (slot t cost = 1 - P(t-th next call ok | earlier ok), exact posterior) + mu*loss;
+  mu raised by bisection (cap 12) until the plan keeps loss <= lossShare*bound. Row 0 (this request) may
+  only take a provider's FIRST slot (else it chooses a later slot it cannot actually get). -0.3 calls.

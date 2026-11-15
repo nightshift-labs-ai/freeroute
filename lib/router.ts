@@ -53,9 +53,68 @@ export interface Params {
   rolloutM: number;
   /** rollout objective: calls + objMu * loss / 1000, plus penalties for an unserved request or a quality floor broken */
   objMu: number;
+  /** 0: greedy (plan order, or rollouts when rolloutK > 1); 1: the slot-assignment plan */
+  planner: number;
+  /** future call slots per provider the assignment plan considers */
+  slotT: number;
+  /** quality loss the assignment plan leaves unplanned under the floor, for the fallbacks refusals force */
+  planMargin: number;
 }
 
-export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.017, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5 };
+export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.0185, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5, planner: 1, slotT: 12, planMargin: 0 };
+
+/** Min-cost assignment of every row to a distinct column (rows <= columns): the Hungarian method with potentials. */
+export function hungarian(cost: number[][]): number[] {
+  const n = cost.length;
+  if (n === 0) return [];
+  const m = cost[0].length;
+  const INF = Number.POSITIVE_INFINITY;
+  const u = new Array<number>(n + 1).fill(0);
+  const v = new Array<number>(m + 1).fill(0);
+  const p = new Array<number>(m + 1).fill(0);
+  const way = new Array<number>(m + 1).fill(0);
+  for (let i = 1; i <= n; i++) {
+    p[0] = i;
+    let j0 = 0;
+    const minv = new Array<number>(m + 1).fill(INF);
+    const used = new Array<boolean>(m + 1).fill(false);
+    do {
+      used[j0] = true;
+      const i0 = p[j0];
+      let delta = INF;
+      let j1 = 0;
+      for (let j = 1; j <= m; j++) {
+        if (used[j]) continue;
+        const cur = cost[i0 - 1][j - 1] - u[i0] - v[j];
+        if (cur < minv[j]) {
+          minv[j] = cur;
+          way[j] = j0;
+        }
+        if (minv[j] < delta) {
+          delta = minv[j];
+          j1 = j;
+        }
+      }
+      for (let j = 0; j <= m; j++) {
+        if (used[j]) {
+          u[p[j]] += delta;
+          v[j] -= delta;
+        } else {
+          minv[j] -= delta;
+        }
+      }
+      j0 = j1;
+    } while (p[j0] !== 0);
+    do {
+      const j1 = way[j0];
+      p[j0] = p[j1];
+      j0 = j1;
+    } while (j0 !== 0);
+  }
+  const out = new Array<number>(n).fill(-1);
+  for (let j = 1; j <= m; j++) if (p[j] !== 0) out[p[j] - 1] = j - 1;
+  return out;
+}
 
 /** The quality column's floor we hold: 98 of 100 keeps the score at its 99 ceiling. */
 const QUALITY_FLOOR_SHARE = 0.0195;
@@ -184,6 +243,7 @@ export class Router {
     const cands = this.plan(entry, requires, needs, tried);
     this.#decisions += 1;
     const at = entry === null ? -1 : this.brief.manifest.findIndex((m) => m.id === entry.id);
+    if (this.params.planner === 1 && at !== -1 && cands.length > 1) return this.#assign(at, cands) ?? cands[0];
     const K = Math.min(this.params.rolloutK, cands.length);
     if (K <= 1 || at === -1) return cands[0];
     const top = cands.slice(0, K);
@@ -200,6 +260,73 @@ export class Router {
     let bestI = 0;
     for (let i = 1; i < top.length; i++) if (totals[i] < totals[bestI] - 1e-9) bestI = i;
     return top[bestI];
+  }
+
+  /**
+   * The certainty-equivalent plan: every request still to serve (this one first) is assigned one future
+   * call slot of one provider (its t-th next call, which succeeds with the posterior's chance given the
+   * calls before it succeed), at the least total cost: the chance each slot is refused plus a price on the
+   * quality each request gives up. The price rises (a Lagrange multiplier, found by bisection) until the
+   * whole plan keeps the quality floor. This request goes to the provider its row was given. Scarce
+   * capabilities are respected for free: a later vision request keeps a vision provider's sure first call.
+   */
+  #assign(at: number, cands: Candidate[]): Candidate | null {
+    const n = this.posterior.ids.length;
+    const T = this.params.slotT;
+    const slotCost: number[][] = [];
+    for (let q = 0; q < n; q++) {
+      const id = this.posterior.ids[q];
+      const row: number[] = [];
+      let prev = 1;
+      for (let t = 1; t <= T; t++) {
+        const all = this.posterior.predict(id, new Array<boolean>(t).fill(true));
+        const cond = prev > 0 ? all / prev : 0;
+        row.push(1 - Math.min(1, Math.max(0, cond)));
+        prev = all;
+      }
+      slotCost.push(row);
+    }
+    const rows: Slot[][] = [cands.map((c) => ({ q: this.order(c.provider.id), rating: c.rating, loss: c.loss }))];
+    for (let j = at + 1; j < this.brief.manifest.length; j++) rows.push(this.#slots[j].filter((s) => !this.broken.has(this.posterior.ids[s.q])));
+    const limit = this.params.lossShare * this.bound - this.params.planMargin;
+    const solve = (mu: number): { first: number; loss: number } => {
+      const m = n * T;
+      const BIG = 1e6;
+      const cost: number[][] = rows.map((slots, i) => {
+        const r = new Array<number>(m).fill(BIG);
+        // This request makes its provider's very next call: row 0 may take only a first slot.
+        for (const s of slots) for (let t = 0; t < (i === 0 ? 1 : T); t++) r[s.q * T + t] = slotCost[s.q][t] + (mu * s.loss) / 1000;
+        return r;
+      });
+      const assign = hungarian(cost);
+      let loss = 0;
+      rows.forEach((slots, i) => {
+        const q = Math.floor(assign[i] / T);
+        const s = slots.find((x) => x.q === q);
+        loss += s === undefined ? 0 : s.loss;
+      });
+      return { first: Math.floor(assign[0] / T), loss };
+    };
+    let plan = solve(this.params.mu);
+    if (this.lossSoFar + plan.loss > limit) {
+      // The price of quality is capped: past it a refusal-prone provider would win on quality alone.
+      const MU_CAP = 12;
+      let lo = this.params.mu;
+      let hi = MU_CAP;
+      let fit = solve(hi);
+      if (this.lossSoFar + fit.loss > limit) return cands.find((c) => this.order(c.provider.id) === fit.first) ?? null;
+      for (let k = 0; k < 10; k++) {
+        const mid = (lo + hi) / 2;
+        const p = solve(mid);
+        if (this.lossSoFar + p.loss > limit) lo = mid;
+        else {
+          hi = mid;
+          fit = p;
+        }
+      }
+      plan = fit;
+    }
+    return cands.find((c) => this.order(c.provider.id) === plan.first) ?? null;
   }
 
   /** Play the workload out from request `at` on one draw of the hidden tiers, `first` called first. */
