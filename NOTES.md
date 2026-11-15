@@ -1,6 +1,6 @@
 # freeroute: working notes
 
-READY TO SUBMIT: 94f154e (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; planner + robustness fixes; sim 10k: 100% score 99, mean 21.9 calls)
+READY TO SUBMIT: dab6a90 (beats submitted 94f154e by 0.161 mean calls: paired sim n=8000 salt=final 21.870 -> 21.708, 95% CI of mean 21.686..21.731, of diff -0.173..-0.150; s99 100%; harness 99/99/99, calls 22/22/22, replay identical)
 
 Competition: make.fun free-model-aggregator-01. Entries close 2026-11-16 02:30 UTC. Do NOT push (the operator pushes).
 Kit: /home/agent/makefun-kit/agg01/x_s222/free-model-aggregator-01-kit (RULES.txt, program/{env,scorer,generator}, practice/trial-{0,1,2}).
@@ -74,3 +74,9 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
   limits (the brief says never drop them), Gemini thoughtSignature round-trip, re-streaming thinking blocks.
 - row0Scale (risk weight on this request's own slot): 0.7 worse (22.36), 1.0/1.3/1.7 equal (21.92). Kept 1.
 - discount (later rows' refusal costs x discount^i): 0.97/0.93 -> 21.99, 0.85 -> 22.09, worse than 1 (21.92). Kept 1.
+- v4 cause-aware posterior (useCause 1): a 402/429's message names its cause in the env ("<name>'s
+  free-tier budget is spent" / "<name> is out" / "<name> refused this call"); the posterior conditions on
+  it ('b': k > B; 'o': outage reached; 's': k in the schedule). Unknown messages fall back to "refused,
+  cause unknown". An outcome sequence the model cannot explain is left out of the role coupling (never
+  zeroes the other providers). Paired sim n=8000 (salt final): 21.870 -> 21.708 (-0.161, CI -0.173..-0.150).
+  `node tools/sim.ts --paired --n 8000 --salt final --b useCause=1` (A = defaults, B = overrides).
