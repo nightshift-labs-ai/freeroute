@@ -1,6 +1,6 @@
 # freeroute: working notes
 
-READY TO SUBMIT: ef834c7 (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; planner + robustness fixes; sim 10k: 100% score 99, mean 21.9 calls)
+READY TO SUBMIT: 92b527c (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; planner + robustness fixes; sim 10k: 100% score 99, mean 21.9 calls)
 
 Competition: make.fun free-model-aggregator-01. Entries close 2026-11-16 02:30 UTC. Do NOT push (the operator pushes).
 Kit: /home/agent/makefun-kit/agg01/x_s222/free-model-aggregator-01-kit (RULES.txt, program/{env,scorer,generator}, practice/trial-{0,1,2}).
@@ -59,3 +59,7 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
   a 400 about the body (not the model) never blacklists, two such refusals end the request with 400;
   catalog probes retried 3x8 s (the catalog is in state.json: a slow probe must not shrink it);
   Hungarian pads columns (rows > columns looped forever).
+- Second round from the wire review: Gemini tools use parametersJsonSchema (full JSON Schema), generated
+  tool-call ids unique per request, Anthropic tool ids sanitised, legacy function_call history keyed by
+  name, Anthropic cache-token fields kept. Not done (deliberately): truncating stop sequences to real-API
+  limits (the brief says never drop them), Gemini thoughtSignature round-trip, re-streaming thinking blocks.
