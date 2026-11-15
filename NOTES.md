@@ -1,6 +1,6 @@
 # freeroute: working notes
 
-READY TO SUBMIT: 3e9ecc4 (harness: 99/99/99 on practice 0/1/2, calls 22/22/23, replay exports identical; LICENSE has the SPDX header)
+READY TO SUBMIT: e63833d (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; slot-assignment planner)
 
 Competition: make.fun free-model-aggregator-01. Entries close 2026-11-16 02:30 UTC. Do NOT push (the operator pushes).
 Kit: /home/agent/makefun-kit/agg01/x_s222/free-model-aggregator-01-kit (RULES.txt, program/{env,scorer,generator}, practice/trial-{0,1,2}).
