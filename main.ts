@@ -229,7 +229,8 @@ async function serveInference(api: ClientApi, req: IncomingMessage, res: ServerR
   let lastCode = 'no_provider';
   for (let attempt = 0; attempt < 24; attempt++) {
     const left = deadline - performance.now();
-    if (clientGone || left < 500) break;
+    // (A client that left while this request waited in the queue fired 'close' before we listened.)
+    if (clientGone || req.socket.destroyed || left < 500) break;
     const c = router.choose(entry, requires, fromBody.needs, skip);
     if (c === undefined) break;
     const call = upstreamCall(api, body, c.provider.wire, c.model);
