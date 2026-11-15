@@ -6,6 +6,15 @@ Competition: make.fun free-model-aggregator-01. Entries close 2026-11-16 02:30 U
 Kit: /home/agent/makefun-kit/agg01/x_s222/free-model-aggregator-01-kit (RULES.txt, program/{env,scorer,generator}, practice/trial-{0,1,2}).
 Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
 
+## Status (2026-11-15 ~22:00 UTC)
+- Entry complete and verified: harness 99/99/99 (quality 98, served/wire/failover/catalog 100), 22 calls
+  per practice trial, replay exports byte-identical, `--list` == registered catalog, `{"providers":[]}`
+  without a brief. Score 99 is the ceiling (quality can never reach 100); the race is the calls tie-break.
+- Sim (10k drawn instances): score 99 in 100%, mean 21.88 calls, max 27.
+- Next if resumed: only small routing gains remain (oracle-free floor is ~1.5 refusals/trial); keep
+  re-running `node tools/harness.ts --trial all --twice --quiet` and `node tools/sim.ts --n 2000 --salt val`
+  after any change; move the READY TO SUBMIT line to the verified commit.
+
 ## Layout
 - main.ts: server (register, /work poll, /v1/models, /v1/chat/completions, /v1/messages, failover loop)
 - lib/brief.ts: brief parser (providers, ratings, manifest), auth headers
