@@ -1,6 +1,6 @@
 # freeroute: working notes
 
-READY TO SUBMIT: 96bee74 (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; planner + robustness fixes; sim 10k: 100% score 99, mean 21.9 calls)
+READY TO SUBMIT: 94f154e (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; planner + robustness fixes; sim 10k: 100% score 99, mean 21.9 calls)
 
 Competition: make.fun free-model-aggregator-01. Entries close 2026-11-16 02:30 UTC. Do NOT push (the operator pushes).
 Kit: /home/agent/makefun-kit/agg01/x_s222/free-model-aggregator-01-kit (RULES.txt, program/{env,scorer,generator}, practice/trial-{0,1,2}).
