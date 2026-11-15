@@ -11,7 +11,8 @@
 
 import { meets, type Brief, type ManifestEntry, type ProviderInfo, type Requires } from './brief.ts';
 import { isFreeIn, type Catalog } from './catalog.ts';
-import { Posterior } from './posterior.ts';
+import { fails, fastPOk, Posterior, Rng, type Hyp } from './posterior.ts';
+import { createHash } from 'node:crypto';
 
 export interface Candidate {
   provider: ProviderInfo;
@@ -46,9 +47,26 @@ export interface Params {
   lossShare: number;
   /** quality loss held back per unit of weight still to come, so late requests keep room to fail over */
   reservePerWeight: number;
+  /** rollout lookahead: candidates compared per decision (0 or 1 turns it off) */
+  rolloutK: number;
+  /** rollout lookahead: posterior draws per decision */
+  rolloutM: number;
+  /** rollout objective: calls + objMu * loss / 1000, plus penalties for an unserved request or a quality floor broken */
+  objMu: number;
 }
 
-export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.017, reservePerWeight: 6 };
+export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.017, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5 };
+
+/** The quality column's floor we hold: 98 of 100 keeps the score at its 99 ceiling. */
+const QUALITY_FLOOR_SHARE = 0.0195;
+const UNSERVED_PENALTY = 25;
+const FLOOR_PENALTY = 25;
+
+interface Slot {
+  q: number;
+  rating: number;
+  loss: number;
+}
 
 export class Router {
   readonly brief: Brief;
@@ -62,15 +80,34 @@ export class Router {
   /** the quality bound: each request's best free rating times its weight */
   readonly bound: number;
   readonly #served = new Set<string>();
+  /** per manifest request: each provider's best slot for it (provider index, rating, loss) */
+  readonly #slots: Slot[][];
+  readonly #weightsAfter: number[];
+  readonly #seed: string;
+  #decisions = 0;
 
-  constructor(brief: Brief, catalog: Catalog, params: Params = DEFAULT_PARAMS) {
+  constructor(brief: Brief, catalog: Catalog, params: Params = DEFAULT_PARAMS, seed = '') {
     this.brief = brief;
     this.catalog = catalog;
     this.params = params;
+    this.#seed = seed;
     this.posterior = new Posterior(brief.providers.map((p) => p.id));
     let bound = 0;
     for (const m of brief.manifest) bound += m.weight * (brief.best.get(m.id) ?? this.bestRating(m.requires, { jsonMode: false, noMaxTokens: false }));
     this.bound = bound;
+    this.#slots = brief.manifest.map((m) => {
+      const needs = { jsonMode: m.api === 'openai' && m.requires.json === true, noMaxTokens: false };
+      const best = brief.best.get(m.id) ?? this.bestRating(m.requires, needs);
+      const byQ = new Map<number, Slot>();
+      for (const e of this.eligible(m.requires, needs)) {
+        const q = this.order(e.provider.id);
+        const slot = { q, rating: e.rating, loss: Math.max(0, best - e.rating) * m.weight };
+        const prev = byQ.get(q);
+        if (prev === undefined || slot.rating > prev.rating) byQ.set(q, slot);
+      }
+      return [...byQ.values()].sort((a, b) => a.q - b.q);
+    });
+    this.#weightsAfter = brief.manifest.map((_, i) => brief.manifest.slice(i + 1).reduce((n, m) => n + m.weight, 0));
   }
 
   /** Every free model that meets the request and its wire needs, unranked. */
@@ -133,6 +170,93 @@ export class Router {
       if (prev === undefined || c.rating > prev.rating) byProvider.set(id, c);
     }
     return [...byProvider.values()].sort((a, b) => a.cost - b.cost || b.rating - a.rating || this.order(a.provider.id) - this.order(b.provider.id));
+  }
+
+  /**
+   * The candidate to call next for this request. The greedy order (plan) decides, unless the rollout
+   * lookahead is on: then the top candidates are each played out to the end of the workload over the same
+   * posterior draws of every provider's hidden tier, the rest of the workload served greedily, and the
+   * candidate with the lowest expected calls (plus a price on quality, and heavy penalties for an unserved
+   * request or the quality floor broken) wins. The draws come from a generator seeded by the trial's seed
+   * and the decision's number, so the same answers always lead to the same choice.
+   */
+  choose(entry: ManifestEntry | null, requires: Requires, needs: WireNeeds, tried: Set<string>): Candidate | undefined {
+    const cands = this.plan(entry, requires, needs, tried);
+    this.#decisions += 1;
+    const at = entry === null ? -1 : this.brief.manifest.findIndex((m) => m.id === entry.id);
+    const K = Math.min(this.params.rolloutK, cands.length);
+    if (K <= 1 || at === -1) return cands[0];
+    const top = cands.slice(0, K);
+    const digest = createHash('sha256').update(`freeroute/rollout/${this.#seed}/${this.#decisions}`).digest();
+    const rng = new Rng(digest.readUInt32BE(0));
+    const totals = top.map(() => 0);
+    const slotsNow: Slot[] = cands.map((c) => ({ q: this.order(c.provider.id), rating: c.rating, loss: c.loss }));
+    for (let m = 0; m < this.params.rolloutM; m++) {
+      const hidden = this.posterior.sample(rng);
+      top.forEach((c, i) => {
+        totals[i] += this.#rollout(hidden, at, slotsNow, this.order(c.provider.id));
+      });
+    }
+    let bestI = 0;
+    for (let i = 1; i < top.length; i++) if (totals[i] < totals[bestI] - 1e-9) bestI = i;
+    return top[bestI];
+  }
+
+  /** Play the workload out from request `at` on one draw of the hidden tiers, `first` called first. */
+  #rollout(hidden: Hyp[], at: number, slotsNow: Slot[], first: number): number {
+    const n = this.posterior.ids.length;
+    const counts: number[] = [];
+    const keys: string[] = [];
+    const ranges: [number, number][] = [];
+    for (let q = 0; q < n; q++) {
+      const obs = this.posterior.obs[q];
+      counts.push(obs.length);
+      keys.push(obs.map((x) => (x ? '1' : '0')).join(''));
+      ranges.push(this.posterior.range(q));
+    }
+    let loss = this.lossSoFar;
+    let calls = 0;
+    let penalty = 0;
+    const mu = this.params.mu / 1000;
+    const total = this.params.lossShare * this.bound;
+    for (let j = at; j < this.brief.manifest.length; j++) {
+      const slots = j === at ? slotsNow : this.#slots[j];
+      const limit = total - this.params.reservePerWeight * this.#weightsAfter[j];
+      let served = false;
+      for (let attempt = 0; attempt < 16 && slots.length > 0; attempt++) {
+        let pick: Slot | null = null;
+        if (j === at && attempt === 0) {
+          pick = slots.find((s) => s.q === first) ?? null;
+        }
+        if (pick === null) {
+          let bestCost = Infinity;
+          for (const s of slots) {
+            const [lo, hi] = ranges[s.q];
+            const p = fastPOk(lo, hi, keys[s.q]);
+            const over = loss + s.loss > limit ? 5 + (loss + s.loss - limit) / 100 : 0;
+            const cost = 1 - p + mu * s.loss + over;
+            if (cost < bestCost - 1e-12) {
+              bestCost = cost;
+              pick = s;
+            }
+          }
+        }
+        if (pick === null) break;
+        const k = counts[pick.q] + 1;
+        counts[pick.q] = k;
+        calls += 1;
+        const refused = fails(hidden[pick.q], k);
+        keys[pick.q] += refused ? '0' : '1';
+        if (!refused) {
+          loss += pick.loss;
+          served = true;
+          break;
+        }
+      }
+      if (!served) penalty += UNSERVED_PENALTY;
+    }
+    if (loss > QUALITY_FLOOR_SHARE * this.bound) penalty += FLOOR_PENALTY;
+    return calls + (this.params.objMu * loss) / 1000 + penalty;
   }
 
   record(o: Outcome): void {

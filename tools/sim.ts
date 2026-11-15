@@ -8,6 +8,7 @@
 //
 //   node tools/sim.ts [--n 2000] [--mu 4] [--share 0.017] [--reserve 6] [--practice] [--sweep]
 
+import { spawn } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parseBrief, type Brief } from '../lib/brief.ts';
@@ -102,9 +103,9 @@ export interface SimResult {
   trace: string[];
 }
 
-export function simulate(brief: Brief, tiers: TierDraw[], params: Params, trace = false): SimResult {
+export function simulate(brief: Brief, tiers: TierDraw[], params: Params, trace = false, seed = ''): SimResult {
   const catalog = buildCatalog(brief, brief.providers.map(() => null));
-  const router = new Router(brief, catalog, params);
+  const router = new Router(brief, catalog, params, seed);
   const counts = new Map<string, number>();
   let calls = 0;
   let valid = 0;
@@ -122,8 +123,7 @@ export function simulate(brief: Brief, tiers: TierDraw[], params: Params, trace 
     let firstFailed = false;
     let servedBy = '';
     for (let attempt = 0; attempt < 24; attempt++) {
-      const plan = router.plan(entry, entry.requires, needs, tried);
-      const c = plan[0];
+      const c = router.choose(entry, entry.requires, needs, tried);
       if (c === undefined) break;
       tried.add(c.provider.id);
       const t = tiers.find((x) => x.id === c.provider.id)!;
@@ -161,7 +161,7 @@ function seeds(n: number, salt = 'sim'): string[] {
   return out;
 }
 
-export function evaluate(brief: Brief, params: Params, n: number, salt = 'sim'): { calls: number; score: number; q98: number; s99: number; minQ: number; maxCalls: number; meanLoss: number } {
+export function evaluate(brief: Brief, params: Params, n: number, salt = 'sim', shard = 0, shards = 1): { calls: number; score: number; q98: number; s99: number; minQ: number; maxCalls: number; meanLoss: number; n: number } {
   let calls = 0;
   let score = 0;
   let q98 = 0;
@@ -169,8 +169,10 @@ export function evaluate(brief: Brief, params: Params, n: number, salt = 'sim'):
   let minQ = 100;
   let maxCalls = 0;
   let loss = 0;
-  for (const seed of seeds(n, salt)) {
-    const r = simulate(brief, drawTiers(seed), params);
+  const mine = seeds(n, salt).filter((_, i) => i % shards === shard);
+  n = mine.length;
+  for (const seed of mine) {
+    const r = simulate(brief, drawTiers(seed), params, false, seed);
     calls += r.calls;
     score += r.score;
     if (r.quality >= 98) q98 += 1;
@@ -179,7 +181,7 @@ export function evaluate(brief: Brief, params: Params, n: number, salt = 'sim'):
     maxCalls = Math.max(maxCalls, r.calls);
     loss += r.loss;
   }
-  return { calls: calls / n, score: score / n, q98: q98 / n, s99: s99 / n, minQ, maxCalls, meanLoss: loss / n };
+  return { calls: calls / n, score: score / n, q98: q98 / n, s99: s99 / n, minQ, maxCalls, meanLoss: loss / n, n };
 }
 
 const isMain = process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '');
@@ -190,26 +192,45 @@ if (isMain) {
     return i !== -1 ? Number(args[i + 1]) : dflt;
   };
   const brief = parseBrief(readFileSync(`${KIT}/practice/trial-0/input/prompt.txt`, 'utf8'));
-  const params: Params = { mu: opt('--mu', DEFAULT_PARAMS.mu), lossShare: opt('--share', DEFAULT_PARAMS.lossShare), reservePerWeight: opt('--reserve', DEFAULT_PARAMS.reservePerWeight) };
+  const params: Params = {
+    mu: opt('--mu', DEFAULT_PARAMS.mu),
+    lossShare: opt('--share', DEFAULT_PARAMS.lossShare),
+    reservePerWeight: opt('--reserve', DEFAULT_PARAMS.reservePerWeight),
+    rolloutK: opt('--K', DEFAULT_PARAMS.rolloutK),
+    rolloutM: opt('--M', DEFAULT_PARAMS.rolloutM),
+    objMu: opt('--objmu', DEFAULT_PARAMS.objMu),
+  };
   const n = opt('--n', 2000);
+  const salt = args.includes('--salt') ? args[args.indexOf('--salt') + 1] : 'sim';
   if (args.includes('--practice')) {
     const yaml = readFileSync(`${KIT}/rules/instance.yaml`, 'utf8');
     const practiceSeeds = [...yaml.matchAll(/seed:\s*"([0-9a-f]{64})"/g)].map((m) => m[1]);
     practiceSeeds.forEach((seed, t) => {
       const tiers = drawTiers(seed);
-      const r = simulate(brief, tiers, params, true);
+      const r = simulate(brief, tiers, params, true, seed);
       process.stdout.write(`practice ${t}: calls ${r.calls} quality ${r.quality} score ${r.score}\n  ${r.trace.join('\n  ')}\n`);
     });
-  } else if (args.includes('--sweep')) {
-    for (const mu of [0, 1, 2, 4, 8, 16]) {
-      for (const reserve of [0, 6, 12]) {
-        const p = { ...params, mu, reservePerWeight: reserve };
-        const e = evaluate(brief, p, n);
-        process.stdout.write(`mu ${mu} reserve ${reserve}: calls ${e.calls.toFixed(3)} score ${e.score.toFixed(3)} s99 ${(100 * e.s99).toFixed(1)}% q98 ${(100 * e.q98).toFixed(1)}% minQ ${e.minQ} maxCalls ${e.maxCalls} loss ${e.meanLoss.toFixed(0)}\n`);
-      }
-    }
+  } else if (args.includes('--shard')) {
+    const [a, b] = args[args.indexOf('--shard') + 1].split('/').map(Number);
+    process.stdout.write(`${JSON.stringify(evaluate(brief, params, n, salt, a, b))}\n`);
   } else {
-    const e = evaluate(brief, params, n);
-    process.stdout.write(`${JSON.stringify(params)}: calls ${e.calls.toFixed(3)} score ${e.score.toFixed(3)} s99 ${(100 * e.s99).toFixed(1)}% q98 ${(100 * e.q98).toFixed(1)}% minQ ${e.minQ} maxCalls ${e.maxCalls} loss ${e.meanLoss.toFixed(0)}\n`);
+    // Fan out over the CPUs: one shard per worker, the same seeds as a single run.
+    const procs = opt('--procs', 4);
+    const self = new URL(import.meta.url).pathname;
+    const rest = args.filter((_, i) => !(args[i] === '--procs' || args[i - 1] === '--procs'));
+    const parts = await Promise.all(
+      Array.from({ length: procs }, (_, k) =>
+        new Promise<ReturnType<typeof evaluate>>((resolve) => {
+          const child = spawn(process.execPath, [self, ...rest, '--shard', `${k}/${procs}`], { stdio: ['ignore', 'pipe', 'inherit'] });
+          let out = '';
+          child.stdout.on('data', (d) => (out += d));
+          child.on('exit', () => resolve(JSON.parse(out)));
+        }),
+      ),
+    );
+    const N = parts.reduce((a, p) => a + p.n, 0);
+    const avg = (f: (p: ReturnType<typeof evaluate>) => number): number => parts.reduce((a, p) => a + f(p) * p.n, 0) / N;
+    const e = { calls: avg((p) => p.calls), score: avg((p) => p.score), s99: avg((p) => p.s99), q98: avg((p) => p.q98), meanLoss: avg((p) => p.meanLoss), minQ: Math.min(...parts.map((p) => p.minQ)), maxCalls: Math.max(...parts.map((p) => p.maxCalls)) };
+    process.stdout.write(`${JSON.stringify(params)} n=${N} salt=${salt}: calls ${e.calls.toFixed(3)} score ${e.score.toFixed(3)} s99 ${(100 * e.s99).toFixed(2)}% q98 ${(100 * e.q98).toFixed(2)}% minQ ${e.minQ} maxCalls ${e.maxCalls} loss ${e.meanLoss.toFixed(0)}\n`);
   }
 }

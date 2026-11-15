@@ -107,11 +107,16 @@ function bodyRequires(api: ClientApi, body: Json): { requires: Requires; needs: 
   if (n.tools.length > 0) requires.tools = true;
   if (n.messages.some((m) => m.parts.some((p) => p.kind === 'image'))) requires.vision = true;
   if (n.jsonMode !== null) requires.json = true;
-  // A rough floor on the context the prompt needs: four characters a token, plus the output cap.
+  // A conservative floor on the context the prompt needs (three characters a token, the tool schemas
+  // included, plus the output cap): only a prompt far past the smallest window narrows the choice.
   let chars = n.system.length;
-  for (const m of n.messages) for (const p of m.parts) chars += p.kind === 'text' ? p.text.length : 0;
+  for (const m of n.messages) {
+    for (const p of m.parts) chars += p.kind === 'text' ? p.text.length : 0;
+    for (const c of m.toolCalls) chars += c.name.length + c.args.length;
+  }
+  for (const t of n.tools) chars += t.name.length + (t.description?.length ?? 0) + JSON.stringify(t.parameters ?? {}).length;
   const estimate = Math.ceil(chars / 3) + (n.maxTokens ?? 0);
-  if (estimate > 8192) requires.min_context = estimate;
+  if (estimate > 16384) requires.min_context = estimate;
   return { requires, needs: { jsonMode: api === 'openai' && n.jsonMode !== null, noMaxTokens: n.maxTokens === null } };
 }
 
@@ -186,8 +191,7 @@ async function serveInference(api: ClientApi, req: IncomingMessage, res: ServerR
   let lastStatus = 503;
   let lastCode = 'no_provider';
   for (let attempt = 0; attempt < 24; attempt++) {
-    const plan = router.plan(entry, requires, fromBody.needs, tried);
-    const c = plan[0];
+    const c = router.choose(entry, requires, fromBody.needs, tried);
     if (c === undefined) break;
     tried.add(c.provider.id);
     const call = upstreamCall(api, body, c.provider.wire, c.model);
@@ -351,7 +355,7 @@ async function main(): Promise<void> {
     await new Promise<void>((resolve) => process.stdout.write(`${catalogText}\n`, () => resolve()));
     process.exit(0);
   }
-  router = new Router(brief, catalog);
+  router = new Router(brief, catalog, undefined, process.env.MAKEFUN_TRIAL_SEED ?? '');
   if (ENV_URL === '') {
     log('MAKEFUN_ENV_URL is not set: nothing to serve');
     process.exit(0);

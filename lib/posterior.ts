@@ -27,7 +27,7 @@ export const KNOWN_BUDGETS: Record<string, [number, number]> = {
 };
 export const GENERIC_BUDGET: [number, number] = [4, 12];
 
-interface Hyp {
+export interface Hyp {
   B: number;
   /** failing call numbers as a bit mask (bit k = call k) */
   F: number;
@@ -36,7 +36,7 @@ interface Hyp {
   w: number;
 }
 
-function fails(h: Hyp, k: number): boolean {
+export function fails(h: Hyp, k: number): boolean {
   return k > h.B || (h.O !== 0 && k >= h.O) || (h.F & (2 ** k)) !== 0;
 }
 
@@ -96,7 +96,7 @@ const SETS = new Map<string, HypSets>();
 /** Memo of a provider's four likelihoods by its budget range and outcome string: a pure function. */
 const LIKELIHOOD = new Map<string, number[]>();
 
-function setsFor(lo: number, hi: number): HypSets {
+export function setsFor(lo: number, hi: number): HypSets {
   const key = `${lo}-${hi}`;
   let s = SETS.get(key);
   if (s === undefined) {
@@ -107,7 +107,7 @@ function setsFor(lo: number, hi: number): HypSets {
 }
 
 /** [L(d=0,o=0), L(d=0,o=1), L(d=1,o=0), L(d=1,o=1)] of an outcome sequence for a provider with budget range [lo, hi]. */
-function likelihoods(lo: number, hi: number, obs: boolean[]): number[] {
+export function likelihoods(lo: number, hi: number, obs: boolean[]): number[] {
   const key = `${lo}-${hi}|${obs.map((x) => (x ? '1' : '0')).join('')}`;
   let v = LIKELIHOOD.get(key);
   if (v === undefined) {
@@ -117,6 +117,82 @@ function likelihoods(lo: number, hi: number, obs: boolean[]): number[] {
   }
   return v;
 }
+
+/** The hypotheses of one role consistent with an outcome sequence, with cumulative weights for sampling. */
+const CONSISTENT = new Map<string, { hyps: Hyp[]; cum: number[] }>();
+
+export function consistent(lo: number, hi: number, role: number, obs: boolean[]): { hyps: Hyp[]; cum: number[] } {
+  const key = `${lo}-${hi}|${role}|${obs.map((x) => (x ? '1' : '0')).join('')}`;
+  let v = CONSISTENT.get(key);
+  if (v === undefined) {
+    const s = setsFor(lo, hi);
+    const all = s[role >> 1][role & 1];
+    const hyps: Hyp[] = [];
+    const cum: number[] = [];
+    let total = 0;
+    outer: for (const h of all) {
+      for (let i = 0; i < obs.length; i++) if (fails(h, i + 1) === obs[i]) continue outer;
+      total += h.w;
+      hyps.push(h);
+      cum.push(total);
+    }
+    v = { hyps, cum };
+    CONSISTENT.set(key, v);
+  }
+  return v;
+}
+
+/** The prior chance that a given provider is the designated one, and the outage one (one of ten each). */
+export const ROLE_PRIOR = 0.1;
+const FAST = new Map<string, number>();
+
+/**
+ * A provider's chance that its next call succeeds from its own outcomes alone (its role taken at the prior,
+ * not coupled to the other providers): the cheap estimate the rollouts use.
+ */
+export function fastPOk(lo: number, hi: number, obsKey: string): number {
+  const key = `${lo}-${hi}|${obsKey}`;
+  let v = FAST.get(key);
+  if (v === undefined) {
+    const obs = [...obsKey].map((c) => c === '1');
+    const mix = (L: number[]): number =>
+      (1 - ROLE_PRIOR) * (1 - ROLE_PRIOR) * L[0] + (1 - ROLE_PRIOR) * ROLE_PRIOR * L[1] + ROLE_PRIOR * (1 - ROLE_PRIOR) * L[2] + ROLE_PRIOR * ROLE_PRIOR * L[3];
+    const now = mix(likelihoods(lo, hi, obs));
+    const next = mix(likelihoods(lo, hi, [...obs, true]));
+    v = now > 0 ? next / now : 0;
+    FAST.set(key, v);
+  }
+  return v;
+}
+
+/** A deterministic 32-bit generator (mulberry32): rollouts draw from it, seeded from the trial's seed. */
+export class Rng {
+  #s: number;
+  constructor(seed: number) {
+    this.#s = seed >>> 0;
+  }
+  next(): number {
+    this.#s = (this.#s + 0x6d2b79f5) >>> 0;
+    let t = this.#s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+}
+
+function pickCum(cum: number[], u: number): number {
+  const target = u * cum[cum.length - 1];
+  let lo = 0;
+  let hi = cum.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] > target) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+export { pickCum };
 
 export class Posterior {
   readonly ids: string[];
@@ -189,6 +265,45 @@ export class Posterior {
     const value = den === 0 ? 0 : num / den;
     this.#cache.set(key, value);
     return value;
+  }
+
+  range(q: number): [number, number] {
+    return this.#ranges[q];
+  }
+
+  /**
+   * One draw of every provider's hidden tier from the posterior: the designated and outage providers
+   * jointly, then each provider's (budget, schedule, outage) among the hypotheses its outcomes allow.
+   */
+  sample(rng: Rng): Hyp[] {
+    const n = this.ids.length;
+    const L = this.ids.map((_, q) => this.#L(q));
+    const weights: number[] = [];
+    let total = 0;
+    for (let d = 0; d < n; d++) {
+      for (let o = 0; o < n; o++) {
+        let w = 1;
+        for (let q = 0; q < n; q++) w *= L[q][(q === d ? 2 : 0) + (q === o ? 1 : 0)];
+        total += w > 0 ? w : 0;
+        weights.push(total);
+      }
+    }
+    const k = total > 0 ? pickCum(weights, rng.next()) : 0;
+    const d = Math.floor(k / n);
+    const o = k % n;
+    const out: Hyp[] = [];
+    for (let q = 0; q < n; q++) {
+      const [lo, hi] = this.#ranges[q];
+      const role = (q === d ? 2 : 0) + (q === o ? 1 : 0);
+      const c = consistent(lo, hi, role, this.obs[q]);
+      if (c.hyps.length === 0) {
+        // Outcomes no hypothesis explains (a provider off the kit's table): treat it as spent.
+        out.push({ B: this.obs[q].length, F: 0, O: 0, w: 0 });
+      } else {
+        out.push(c.hyps[pickCum(c.cum, rng.next())]);
+      }
+    }
+    return out;
   }
 
   /** P(the next call to provider `id` succeeds). */
