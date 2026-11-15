@@ -132,7 +132,9 @@ export function simulate(brief: Brief, tiers: TierDraw[], params: Params, trace 
       const refused = n > t.budget || (t.outage_from !== null && n >= t.outage_from) || t.fail_calls.includes(n);
       if (first) firstFailed = refused;
       first = false;
-      router.record({ provider: t.id, model: c.model, ok: !refused, status: refused ? t.status : 200, code: refused ? 'x' : '' });
+      // The env's own refusal messages (program/env/server.mjs, Providers.handle), checked in its order.
+      const message = !refused ? '' : n > t.budget ? `${t.id}'s free-tier budget is spent` : t.outage_from !== null && n >= t.outage_from ? `${t.id} is out` : `${t.id} refused this call`;
+      router.record({ provider: t.id, model: c.model, ok: !refused, status: refused ? t.status : 200, code: refused ? 'x' : '', message });
       if (trace) lines.push(`${entry.id} -> ${t.id}#${n} ${c.model} p=${c.pOk.toFixed(2)} loss=${c.loss} ${refused ? 'REFUSED' : 'ok'}`);
       if (!refused) {
         router.served(entry, c);
@@ -205,6 +207,7 @@ if (isMain) {
     deadCost: opt('--dead', DEFAULT_PARAMS.deadCost),
     row0Scale: opt('--row0', DEFAULT_PARAMS.row0Scale),
     discount: opt('--disc', DEFAULT_PARAMS.discount),
+    useCause: opt('--cause', DEFAULT_PARAMS.useCause),
   };
   const n = opt('--n', 2000);
   const salt = args.includes('--salt') ? args[args.indexOf('--salt') + 1] : 'sim';
@@ -216,6 +219,49 @@ if (isMain) {
       const r = simulate(brief, tiers, params, true, seed);
       process.stdout.write(`practice ${t}: calls ${r.calls} quality ${r.quality} score ${r.score}\n  ${r.trace.join('\n  ')}\n`);
     });
+  } else if (args.includes('--paired-shard')) {
+    // Paired A/B on the same drawn instances: A = the params above, B = A with --b key=value,... applied.
+    const [a, b] = args[args.indexOf('--paired-shard') + 1].split('/').map(Number);
+    const B: Params = { ...params };
+    for (const kv of (args.includes('--b') ? args[args.indexOf('--b') + 1] : '').split(',').filter(Boolean)) {
+      const [k, v] = kv.split('=');
+      (B as unknown as Record<string, number>)[k] = Number(v);
+    }
+    let n2 = 0, sa = 0, sb = 0, sd = 0, sdd = 0, sbb = 0, s99a = 0, s99b = 0;
+    seeds(n, salt).forEach((seed, i) => {
+      if (i % b !== a) return;
+      const tiers = drawTiers(seed);
+      const ra = simulate(brief, tiers, params, false, seed);
+      const rb = simulate(brief, tiers, B, false, seed);
+      n2 += 1; sa += ra.calls; sb += rb.calls; sbb += rb.calls * rb.calls;
+      const d = rb.calls - ra.calls; sd += d; sdd += d * d;
+      if (ra.score >= 99) s99a += 1;
+      if (rb.score >= 99) s99b += 1;
+    });
+    process.stdout.write(`${JSON.stringify({ n: n2, sa, sb, sd, sdd, sbb, s99a, s99b })}\n`);
+  } else if (args.includes('--paired')) {
+    const procs = opt('--procs', 4);
+    const self = new URL(import.meta.url).pathname;
+    const rest = args.filter((x, i) => x !== '--paired' && !(args[i] === '--procs' || args[i - 1] === '--procs'));
+    const parts = await Promise.all(
+      Array.from({ length: procs }, (_, k) =>
+        new Promise<Record<string, number>>((resolve) => {
+          const child = spawn(process.execPath, [self, ...rest, '--paired-shard', `${k}/${procs}`], { stdio: ['ignore', 'pipe', 'inherit'] });
+          let out = '';
+          child.stdout.on('data', (d) => (out += d));
+          child.on('exit', () => resolve(JSON.parse(out)));
+        }),
+      ),
+    );
+    const t = parts.reduce((acc, p) => { for (const k of Object.keys(p)) acc[k] = (acc[k] ?? 0) + p[k]; return acc; }, {} as Record<string, number>);
+    const N = t.n;
+    const md = t.sd / N;
+    const sdD = Math.sqrt(Math.max(0, t.sdd / N - md * md));
+    const mb = t.sb / N;
+    const sdB = Math.sqrt(Math.max(0, t.sbb / N - mb * mb));
+    process.stdout.write(
+      `paired n=${N} salt=${salt}: A ${(t.sa / N).toFixed(3)} calls (s99 ${((100 * t.s99a) / N).toFixed(2)}%), B ${mb.toFixed(3)} calls (s99 ${((100 * t.s99b) / N).toFixed(2)}%, 95% CI ${(mb - (1.96 * sdB) / Math.sqrt(N)).toFixed(3)}..${(mb + (1.96 * sdB) / Math.sqrt(N)).toFixed(3)}); B-A ${md.toFixed(3)} (95% CI ${(md - (1.96 * sdD) / Math.sqrt(N)).toFixed(3)}..${(md + (1.96 * sdD) / Math.sqrt(N)).toFixed(3)})\n`,
+    );
   } else if (args.includes('--shard')) {
     const [a, b] = args[args.indexOf('--shard') + 1].split('/').map(Number);
     process.stdout.write(`${JSON.stringify(evaluate(brief, params, n, salt, a, b))}\n`);

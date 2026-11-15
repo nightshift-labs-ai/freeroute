@@ -11,7 +11,7 @@
 
 import { meets, type Brief, type ManifestEntry, type ProviderInfo, type Requires } from './brief.ts';
 import { isFreeIn, type Catalog } from './catalog.ts';
-import { fails, fastPOk, Posterior, Rng, type Hyp } from './posterior.ts';
+import { fails, fastPOk, obsKey, Posterior, Rng, type Hyp } from './posterior.ts';
 import { createHash } from 'node:crypto';
 
 export interface Candidate {
@@ -71,9 +71,11 @@ export interface Params {
   row0Scale: number;
   /** each later row's refusal costs count discount^i: the further a request, the more the plan will change */
   discount: number;
+  /** 1: read the refusal's cause from the provider's error message (budget spent, out, schedule) */
+  useCause: number;
 }
 
-export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.0185, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5, planner: 1, slotT: 12, planMargin: 0, slotModel: 0, deadCost: 1.5, row0Scale: 1, discount: 1 };
+export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.0185, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5, planner: 1, slotT: 12, planMargin: 0, slotModel: 0, deadCost: 1.5, row0Scale: 1, discount: 1, useCause: 1 };
 
 /** Min-cost assignment of every row to a distinct column (rows <= columns): the Hungarian method with potentials. */
 export function hungarian(cost: number[][]): number[] {
@@ -375,7 +377,7 @@ export class Router {
     for (let q = 0; q < n; q++) {
       const obs = this.posterior.obs[q];
       counts.push(obs.length);
-      keys.push(obs.map((x) => (x ? '1' : '0')).join(''));
+      keys.push(obsKey(obs));
       ranges.push(this.posterior.range(q));
     }
     let loss = this.lossSoFar;
@@ -423,6 +425,18 @@ export class Router {
     return calls + (this.params.objMu * loss) / 1000 + penalty;
   }
 
+  /**
+   * Why a provider refused, when its answer says so: its free-tier budget is spent ('b', every later call
+   * refused too), it is out ('o', likewise), or this call fell on its rate-limit schedule ('s', the next
+   * may pass). Null when the message does not say: the posterior then weighs every cause.
+   */
+  static refusalCause(message: string): 'b' | 'o' | 's' | null {
+    if (/budget is spent/i.test(message)) return 'b';
+    if (/\bis out\b/i.test(message)) return 'o';
+    if (/refused this call/i.test(message)) return 's';
+    return null;
+  }
+
   /** Is a 4xx about the model (unknown, paid, retired) rather than about the request body? */
   static modelLevel(code: string, message: string): boolean {
     return code === 'invalid_model' || code === 'model_not_found' || code === 'not_found_error' || /\bmodel\b/i.test(message);
@@ -436,7 +450,7 @@ export class Router {
     if (o.ok) {
       this.posterior.observe(o.provider, true);
     } else if (o.status === 402 || o.status === 429) {
-      this.posterior.observe(o.provider, false);
+      this.posterior.observe(o.provider, false, this.params.useCause === 1 ? Router.refusalCause(o.message ?? '') : null);
     } else if (o.status === 400 || o.status === 404 || o.status === 413 || o.status === 422) {
       // Only a refusal of the model marks it; a refusal of the request body says nothing about the next one.
       if (Router.modelLevel(o.code, o.message ?? '')) this.broken.add(`${o.provider}/${o.model}`);

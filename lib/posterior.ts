@@ -82,11 +82,39 @@ function hypSets(lo: number, hi: number): HypSets {
   ];
 }
 
-/** Total prior weight of the hypotheses consistent with `obs` (obs[i] = call i+1 succeeded). */
-function weight(hs: Hyp[], obs: boolean[]): number {
+/**
+ * One counted call's outcome: true it succeeded, false it was refused for a reason we do not know, or the
+ * refusal's cause when the provider's answer named it: 'b' its budget was spent, 'o' it was out (the
+ * outage), 's' the call fell on its failure schedule.
+ */
+export type Obs = boolean | 'b' | 'o' | 's';
+
+export function obsKey(obs: Obs[]): string {
+  let k = '';
+  for (const o of obs) k += o === true ? '1' : o === false ? '0' : o;
+  return k;
+}
+
+function obsOfKey(key: string): Obs[] {
+  return [...key].map((c) => (c === '1' ? true : c === '0' ? false : (c as 'b' | 'o' | 's')));
+}
+
+/** Does hypothesis h explain call k's outcome o? */
+export function agrees(h: Hyp, k: number, o: Obs): boolean {
+  if (o === true) return !fails(h, k);
+  if (o === false) return fails(h, k);
+  const over = k > h.B;
+  const out = h.O !== 0 && k >= h.O;
+  if (o === 'b') return over;
+  if (o === 'o') return !over && out;
+  return !over && !out && (h.F & (2 ** k)) !== 0;
+}
+
+/** Total prior weight of the hypotheses consistent with `obs` (obs[i] = call i+1's outcome). */
+function weight(hs: Hyp[], obs: Obs[]): number {
   let total = 0;
   outer: for (const h of hs) {
-    for (let i = 0; i < obs.length; i++) if (fails(h, i + 1) === obs[i]) continue outer;
+    for (let i = 0; i < obs.length; i++) if (!agrees(h, i + 1, obs[i])) continue outer;
     total += h.w;
   }
   return total;
@@ -107,8 +135,8 @@ export function setsFor(lo: number, hi: number): HypSets {
 }
 
 /** [L(d=0,o=0), L(d=0,o=1), L(d=1,o=0), L(d=1,o=1)] of an outcome sequence for a provider with budget range [lo, hi]. */
-export function likelihoods(lo: number, hi: number, obs: boolean[]): number[] {
-  const key = `${lo}-${hi}|${obs.map((x) => (x ? '1' : '0')).join('')}`;
+export function likelihoods(lo: number, hi: number, obs: Obs[]): number[] {
+  const key = `${lo}-${hi}|${obsKey(obs)}`;
   let v = LIKELIHOOD.get(key);
   if (v === undefined) {
     const s = setsFor(lo, hi);
@@ -121,8 +149,8 @@ export function likelihoods(lo: number, hi: number, obs: boolean[]): number[] {
 /** The hypotheses of one role consistent with an outcome sequence, with cumulative weights for sampling. */
 const CONSISTENT = new Map<string, { hyps: Hyp[]; cum: number[] }>();
 
-export function consistent(lo: number, hi: number, role: number, obs: boolean[]): { hyps: Hyp[]; cum: number[] } {
-  const key = `${lo}-${hi}|${role}|${obs.map((x) => (x ? '1' : '0')).join('')}`;
+export function consistent(lo: number, hi: number, role: number, obs: Obs[]): { hyps: Hyp[]; cum: number[] } {
+  const key = `${lo}-${hi}|${role}|${obsKey(obs)}`;
   let v = CONSISTENT.get(key);
   if (v === undefined) {
     const s = setsFor(lo, hi);
@@ -131,7 +159,7 @@ export function consistent(lo: number, hi: number, role: number, obs: boolean[])
     const cum: number[] = [];
     let total = 0;
     outer: for (const h of all) {
-      for (let i = 0; i < obs.length; i++) if (fails(h, i + 1) === obs[i]) continue outer;
+      for (let i = 0; i < obs.length; i++) if (!agrees(h, i + 1, obs[i])) continue outer;
       total += h.w;
       hyps.push(h);
       cum.push(total);
@@ -154,7 +182,7 @@ export function fastPOk(lo: number, hi: number, obsKey: string): number {
   const key = `${lo}-${hi}|${obsKey}`;
   let v = FAST.get(key);
   if (v === undefined) {
-    const obs = [...obsKey].map((c) => c === '1');
+    const obs = obsOfKey(obsKey);
     const mix = (L: number[]): number =>
       (1 - ROLE_PRIOR) * (1 - ROLE_PRIOR) * L[0] + (1 - ROLE_PRIOR) * ROLE_PRIOR * L[1] + ROLE_PRIOR * (1 - ROLE_PRIOR) * L[2] + ROLE_PRIOR * ROLE_PRIOR * L[3];
     const now = mix(likelihoods(lo, hi, obs));
@@ -197,8 +225,8 @@ export { pickCum };
 const REFUSALS = new Map<string, number[]>();
 
 /** Mean refusals before the s-th next success (s = 1..T) over one role's hypotheses consistent with `obs`. */
-function refusalTable(lo: number, hi: number, role: number, obs: boolean[], T: number, dead: number): number[] {
-  const key = `${lo}-${hi}|${role}|${T}|${dead}|${obs.map((x) => (x ? '1' : '0')).join('')}`;
+function refusalTable(lo: number, hi: number, role: number, obs: Obs[], T: number, dead: number): number[] {
+  const key = `${lo}-${hi}|${role}|${T}|${dead}|${obsKey(obs)}`;
   let v = REFUSALS.get(key);
   if (v !== undefined) return v;
   const { hyps, cum } = consistent(lo, hi, role, obs);
@@ -237,7 +265,7 @@ export class Posterior {
   readonly ids: string[];
   readonly #ranges: [number, number][];
   /** counted call outcomes per provider, in call order */
-  readonly obs: boolean[][];
+  readonly obs: Obs[][];
   #cache: Map<string, number> = new Map();
 
   constructor(ids: string[]) {
@@ -251,10 +279,10 @@ export class Posterior {
   }
 
   /** Record one counted call (a success, or a refusal that spent the provider's budget). */
-  observe(id: string, ok: boolean): void {
+  observe(id: string, ok: boolean, cause: 'b' | 'o' | 's' | null = null): void {
     const i = this.index(id);
     if (i === -1) return;
-    this.obs[i].push(ok);
+    this.obs[i].push(ok ? true : (cause ?? false));
     this.#cache.clear();
   }
 
@@ -263,9 +291,23 @@ export class Posterior {
     return i === -1 ? 0 : this.obs[i].length;
   }
 
-  #L(q: number, extra: boolean[] = []): number[] {
+  #L(q: number, extra: Obs[] = []): number[] {
     const [lo, hi] = this.#ranges[q];
     return likelihoods(lo, hi, extra.length === 0 ? this.obs[q] : [...this.obs[q], ...extra]);
+  }
+
+  /** Can the model explain provider q's outcomes at all? (Never false against the kit's env.) */
+  explained(q: number): boolean {
+    return this.#L(q).some((x) => x > 0);
+  }
+
+  /**
+   * Provider q's likelihoods for coupling the providers' roles: one whose outcomes the model cannot
+   * explain is left out of the coupling (neutral), so it never zeroes every other provider's estimate.
+   */
+  #Lc(q: number): number[] {
+    const L = this.#L(q);
+    return L.some((x) => x > 0) ? L : [1, 1, 1, 1];
   }
 
   /** P(the next `outcomes.length` calls to provider `id` go exactly as `outcomes`), given everything seen. */
@@ -277,7 +319,15 @@ export class Posterior {
     if (p === -1) return 0.5;
     const n = this.ids.length;
     // L[q][2d+o]: weight of provider q's outcomes under (designated d, outage o)
-    const L = this.ids.map((_, q) => this.#L(q));
+    const L = this.ids.map((_, q) => this.#Lc(q));
+    if (!this.explained(p)) {
+      // Off the model: a plain guess from the last outcome (a refusal makes the next one likely too).
+      const last = this.obs[p][this.obs[p].length - 1];
+      const one = last === undefined || last === true ? 0.5 : 0.1;
+      const v = outcomes.reduce((acc, ok) => acc * (ok ? one : 1 - one), 1);
+      this.#cache.set(key, v);
+      return v;
+    }
     const Lnext = this.#L(p, outcomes);
     // Every provider plain, then the joint weight of (designated d, outage o) by likelihood ratios.
     let num = 0;
@@ -313,7 +363,7 @@ export class Posterior {
   /** P(designated d, outage o) for every pair, from the providers' likelihoods: index d * n + o. */
   roleWeights(): number[] {
     const n = this.ids.length;
-    const L = this.ids.map((_, q) => this.#L(q));
+    const L = this.ids.map((_, q) => this.#Lc(q));
     const w: number[] = [];
     let total = 0;
     for (let d = 0; d < n; d++) {
@@ -358,7 +408,7 @@ export class Posterior {
    */
   sample(rng: Rng): Hyp[] {
     const n = this.ids.length;
-    const L = this.ids.map((_, q) => this.#L(q));
+    const L = this.ids.map((_, q) => this.#Lc(q));
     const weights: number[] = [];
     let total = 0;
     for (let d = 0; d < n; d++) {
