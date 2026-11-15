@@ -1,6 +1,6 @@
 # freeroute: working notes
 
-READY TO SUBMIT: e63833d (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; slot-assignment planner)
+READY TO SUBMIT: ef834c7 (harness: 99/99/99 on practice 0/1/2, calls 22/22/22, replay exports identical; planner + robustness fixes; sim 10k: 100% score 99, mean 21.9 calls)
 
 Competition: make.fun free-model-aggregator-01. Entries close 2026-11-16 02:30 UTC. Do NOT push (the operator pushes).
 Kit: /home/agent/makefun-kit/agg01/x_s222/free-model-aggregator-01-kit (RULES.txt, program/{env,scorer,generator}, practice/trial-{0,1,2}).
@@ -54,3 +54,8 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
 - Remaining refusals are on the two workhorses (openrouter ~1.1, kilol ~0.6 per trial): near the floor the
   generator's failure density allows (each provider has 1-2 schedule failures in calls 2..B-1).
 - Planner decision latency: mean 1.1 ms, worst ~50 ms, cold first trial ~110 ms total.
+- Robustness fixes from the server review: one 26 s deadline per request (calls capped at 12 s) and no new
+  provider call once the client has gone; 429 concurrent_requests skips the provider for this request only;
+  a 400 about the body (not the model) never blacklists, two such refusals end the request with 400;
+  catalog probes retried 3x8 s (the catalog is in state.json: a slow probe must not shrink it);
+  Hungarian pads columns (rows > columns looped forever).
