@@ -61,9 +61,13 @@ export interface Params {
   slotT: number;
   /** quality loss the assignment plan leaves unplanned under the floor, for the fallbacks refusals force */
   planMargin: number;
+  /** slot costs: 0 the chained chance a slot is refused; 1 the exact expected extra refusals of each success */
+  slotModel: number;
+  /** slotModel 1: refusals a success that can never come is charged (what finding out costs) */
+  deadCost: number;
 }
 
-export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.0185, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5, planner: 1, slotT: 12, planMargin: 0 };
+export const DEFAULT_PARAMS: Params = { mu: 0.5, lossShare: 0.0185, reservePerWeight: 6, rolloutK: 0, rolloutM: 32, objMu: 0.5, planner: 1, slotT: 12, planMargin: 0, slotModel: 0, deadCost: 1.5 };
 
 /** Min-cost assignment of every row to a distinct column (rows <= columns): the Hungarian method with potentials. */
 export function hungarian(cost: number[][]): number[] {
@@ -290,15 +294,22 @@ export class Router {
     const n = this.posterior.ids.length;
     const T = this.params.slotT;
     const slotCost: number[][] = [];
+    const roles = this.params.slotModel === 1 ? this.posterior.roleWeights() : [];
     for (let q = 0; q < n; q++) {
       const id = this.posterior.ids[q];
       const row: number[] = [];
-      let prev = 1;
-      for (let t = 1; t <= T; t++) {
-        const all = this.posterior.predict(id, new Array<boolean>(t).fill(true));
-        const cond = prev > 0 ? all / prev : 0;
-        row.push(1 - Math.min(1, Math.max(0, cond)));
-        prev = all;
+      if (this.params.slotModel === 1) {
+        // Slot t costs the extra refusals the t-th success from this provider is expected to bring.
+        const e = this.posterior.expectedRefusals(id, T, this.params.deadCost, roles);
+        for (let t = 0; t < T; t++) row.push(Math.max(0, e[t] - (t > 0 ? e[t - 1] : 0)));
+      } else {
+        let prev = 1;
+        for (let t = 1; t <= T; t++) {
+          const all = this.posterior.predict(id, new Array<boolean>(t).fill(true));
+          const cond = prev > 0 ? all / prev : 0;
+          row.push(1 - Math.min(1, Math.max(0, cond)));
+          prev = all;
+        }
       }
       slotCost.push(row);
     }

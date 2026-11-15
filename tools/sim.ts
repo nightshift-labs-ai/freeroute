@@ -202,6 +202,8 @@ if (isMain) {
     planner: opt('--planner', DEFAULT_PARAMS.planner),
     slotT: opt('--T', DEFAULT_PARAMS.slotT),
     planMargin: opt('--margin', DEFAULT_PARAMS.planMargin),
+    slotModel: opt('--slot', DEFAULT_PARAMS.slotModel),
+    deadCost: opt('--dead', DEFAULT_PARAMS.deadCost),
   };
   const n = opt('--n', 2000);
   const salt = args.includes('--salt') ? args[args.indexOf('--salt') + 1] : 'sim';

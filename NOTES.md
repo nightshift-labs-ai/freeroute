@@ -49,3 +49,8 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
 - Fidelity fixes from the wire-review workflow: Anthropic stop_sequence kept, legacy function_call and
   refusal read, reply ids never copied across wires, usage always present, Anthropic error types by status,
   data-URL media type without parameters.
+- Tried slotModel 1 (exact expected refusals before the s-th success, non-adaptive): WORSE, 22.28 vs 21.97
+  calls (val-1000). Kept off. mu, slotT (8/12/16), planMargin barely matter; the Lagrangian bisection rules.
+- Remaining refusals are on the two workhorses (openrouter ~1.1, kilol ~0.6 per trial): near the floor the
+  generator's failure density allows (each provider has 1-2 schedule failures in calls 2..B-1).
+- Planner decision latency: mean 1.1 ms, worst ~50 ms, cold first trial ~110 ms total.

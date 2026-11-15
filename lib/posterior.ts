@@ -194,6 +194,45 @@ function pickCum(cum: number[], u: number): number {
 
 export { pickCum };
 
+const REFUSALS = new Map<string, number[]>();
+
+/** Mean refusals before the s-th next success (s = 1..T) over one role's hypotheses consistent with `obs`. */
+function refusalTable(lo: number, hi: number, role: number, obs: boolean[], T: number, dead: number): number[] {
+  const key = `${lo}-${hi}|${role}|${T}|${dead}|${obs.map((x) => (x ? '1' : '0')).join('')}`;
+  let v = REFUSALS.get(key);
+  if (v !== undefined) return v;
+  const { hyps, cum } = consistent(lo, hi, role, obs);
+  const acc = new Array<number>(T).fill(0);
+  const total = cum.length > 0 ? cum[cum.length - 1] : 0;
+  if (total <= 0) {
+    v = acc.map(() => dead);
+  } else {
+    for (const h of hyps) {
+      let k = obs.length;
+      let refused = 0;
+      let got = 0;
+      // The last call that can still succeed: the budget's end, or just before the outage.
+      const lastOk = h.O !== 0 ? Math.min(h.B, h.O - 1) : h.B;
+      while (got < T) {
+        k += 1;
+        if (k > lastOk) {
+          for (let t = got; t < T; t++) acc[t] += h.w * (refused + dead);
+          got = T;
+          break;
+        }
+        if (fails(h, k)) refused += 1;
+        else {
+          acc[got] += h.w * refused;
+          got += 1;
+        }
+      }
+    }
+    v = acc.map((x) => x / total);
+  }
+  REFUSALS.set(key, v);
+  return v;
+}
+
 export class Posterior {
   readonly ids: string[];
   readonly #ranges: [number, number][];
@@ -269,6 +308,48 @@ export class Posterior {
 
   range(q: number): [number, number] {
     return this.#ranges[q];
+  }
+
+  /** P(designated d, outage o) for every pair, from the providers' likelihoods: index d * n + o. */
+  roleWeights(): number[] {
+    const n = this.ids.length;
+    const L = this.ids.map((_, q) => this.#L(q));
+    const w: number[] = [];
+    let total = 0;
+    for (let d = 0; d < n; d++) {
+      for (let o = 0; o < n; o++) {
+        let x = 1;
+        for (let q = 0; q < n; q++) x *= L[q][(q === d ? 2 : 0) + (q === o ? 1 : 0)];
+        x = x > 0 ? x : 0;
+        w.push(x);
+        total += x;
+      }
+    }
+    return total > 0 ? w.map((x) => x / total) : w;
+  }
+
+  /**
+   * E[refused calls before the s-th success from now] for s = 1..T, exactly over the posterior: every
+   * hypothesis the provider's outcomes allow, weighted by its role's posterior chance. A success the
+   * provider can never give again (budget spent or out) counts `dead` refusals: what finding that out costs.
+   */
+  expectedRefusals(id: string, T: number, dead: number, roles: number[]): number[] {
+    const q = this.index(id);
+    const out = new Array<number>(T).fill(0);
+    if (q === -1) return out.map(() => dead);
+    const n = this.ids.length;
+    const pRole = [0, 0, 0, 0];
+    for (let d = 0; d < n; d++) for (let o = 0; o < n; o++) pRole[(q === d ? 2 : 0) + (q === o ? 1 : 0)] += roles[d * n + o];
+    const [lo, hi] = this.#ranges[q];
+    const obs = this.obs[q];
+    const start = obs.length;
+    for (let role = 0; role < 4; role++) {
+      if (pRole[role] <= 0) continue;
+      const per = refusalTable(lo, hi, role, obs, T, dead);
+      for (let t = 0; t < T; t++) out[t] += pRole[role] * per[t];
+    }
+    void start;
+    return out;
   }
 
   /**
