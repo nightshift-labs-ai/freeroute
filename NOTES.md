@@ -26,3 +26,12 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
 | version | t0 | t1 | t2 | calls t0/t1/t2 |
 |---|---|---|---|---|
 | v1 naive best-rating + hop on refusal | 99 (q98) | 99 (q99) | 99 (q98) | 28/26/28 |
+| v2 posterior-greedy (mu 0.5, share .017), re-call allowed | 99 (q98) | 99 (q98) | 99 (q98) | 22/22/23 (sim mean 22.19 over 2000, s99 100%) |
+
+## Router / simulator
+- lib/posterior.ts: exact Bayesian posterior per provider over (budget, fail set, outage), coupled by
+  exactly-one designated / exactly-one outage. Budget ranges hardcoded from the kit env's public table.
+- tools/sim.ts reproduces the generator's draws (HMAC stream) + env refusal logic; runs the real Router.
+  `node tools/sim.ts --n 2000 --mu 0.5` ; `--practice` traces the 3 practice seeds (matches harness exactly).
+- Lesson: never exclude a provider already tried in this request (a schedule refusal leaves the next call
+  free) -- excluding caused unserved scarce requests (r06 vision, r10-12 min_context) in ~8% of instances.

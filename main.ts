@@ -197,6 +197,7 @@ async function serveInference(api: ClientApi, req: IncomingMessage, res: ServerR
     router.record({ provider: c.provider.id, model: c.model, ok: ok && answer !== null, status: result.status, code: result.code });
     log(`${tag} ${api}${stream ? ' stream' : ''} -> ${c.provider.id}/${c.model}: ${result.status}${result.code === '' ? '' : ` ${result.code}`}`);
     if (ok && answer !== null) {
+      router.served(entry, c);
       const prefix = api === 'openai' ? 'chatcmpl-' : 'msg_';
       const ids = { id: answer.id ?? `${prefix}${tag}`, created: CREATED };
       send(res, clientReply(api, stream, c.provider.wire, result.body, answer, ids));
