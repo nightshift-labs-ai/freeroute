@@ -1,5 +1,7 @@
 # freeroute: working notes
 
+READY TO SUBMIT: 3e9ecc4 (harness: 99/99/99 on practice 0/1/2, calls 22/22/23, replay exports identical; LICENSE has the SPDX header)
+
 Competition: make.fun free-model-aggregator-01. Entries close 2026-11-16 02:30 UTC. Do NOT push (the operator pushes).
 Kit: /home/agent/makefun-kit/agg01/x_s222/free-model-aggregator-01-kit (RULES.txt, program/{env,scorer,generator}, practice/trial-{0,1,2}).
 Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
@@ -27,6 +29,7 @@ Node: /home/agent/tools/node22/bin/node (v22.23.4, type stripping unflagged).
 |---|---|---|---|---|
 | v1 naive best-rating + hop on refusal | 99 (q98) | 99 (q99) | 99 (q98) | 28/26/28 |
 | v2 posterior-greedy (mu 0.5, share .017), re-call allowed | 99 (q98) | 99 (q98) | 99 (q98) | 22/22/23 (sim mean 22.19 over 2000, s99 100%) |
+| 3e9ecc4 same + SPDX header, rollout code (off) | 99 (q98) | 99 (q98) | 99 (q98) | 22/22/23 |
 
 ## Router / simulator
 - lib/posterior.ts: exact Bayesian posterior per provider over (budget, fail set, outage), coupled by
